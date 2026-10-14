@@ -224,6 +224,7 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
       <h2 id="t-res">Resultados</h2>
       <div class="toolbar">
         <button type="button" class="small" id="enrich">Buscar redes sociais e mais e-mails</button>
+        <button type="button" class="small" id="verify-wa" hidden>Confirmar WhatsApp</button>
         <button type="button" class="small" id="dl-clean">Baixar planilha</button>
         <a class="btn small" id="dl-full" href="#">CSV completo (34 colunas)</a>
       </div>
@@ -234,6 +235,7 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
       <input type="text" id="filter" placeholder="Filtrar por nome, categoria, bairro…" aria-label="Filtrar resultados">
       <label class="check"><input type="checkbox" id="only-email"> Só com e-mail</label>
       <label class="check"><input type="checkbox" id="only-phone"> Só com telefone</label>
+      <label class="check"><input type="checkbox" id="only-wa"> Só com WhatsApp</label>
       <label class="check"><input type="checkbox" id="only-relevant" checked> Só do tema da busca</label>
     </div>
     <div class="table-wrap">
@@ -252,7 +254,7 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
 <script>
 const API = "/api/v1/jobs";
 const LEAD = ["title", "phone", "emails", "website", "category", "address", "review_rating", "review_count"];
-const HEAD_PT = { title: "Empresa", phone: "Telefone", emails: "E-mail", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Nota", review_count: "Avaliações", whatsapp: "WhatsApp", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
+const HEAD_PT = { title: "Empresa", phone: "Telefone", emails: "E-mail", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Nota", review_count: "Avaliações", whatsapp: "WhatsApp", wa_ok: "WhatsApp confirmado", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
 const SOCIAL = ["instagram", "facebook", "linkedin"];
 const STATUS_PT = { pending: "na fila", working: "buscando", ok: "pronta", failed: "falhou", stuck: "interrompida" };
 // The engine marks a job "working" and never revisits it if the server restarts mid-run.
@@ -470,16 +472,7 @@ async function openResults(j) {
     // /leads does the cleaning (emails, phones, WhatsApp, sites, off-topic results) on the server,
     // the same way integrations like Prospecta get it.
     const r = await api("/leads/buscas/" + encodeURIComponent(j.ID) + "?relevantes=0");
-    const data = await r.json();
-    current.status = data.status;
-    current.rows = (data.leads || []).map(x => ({
-      title: x.nome, phone: x.telefone, emails: (x.emails || []).join(", "), website: x.site,
-      category: x.categoria, address: x.endereco, review_rating: x.nota == null ? "" : String(x.nota),
-      review_count: x.avaliacoes ? String(x.avaliacoes) : "", whatsapp: x.whatsapp,
-      instagram: x.instagram, facebook: x.facebook, linkedin: x.linkedin, relevante: x.relevante,
-    }));
-    current.enriched = false;
-    applyEnrichment(loadEnrichment(j.ID));
+    loadLeads(await r.json());
     renderResults();
     $("results").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
   } catch (e) {
@@ -489,11 +482,45 @@ async function openResults(j) {
   }
 }
 
+function loadLeads(data) {
+  current.status = data.status;
+  current.verified = (data.leads || []).some(x => x.whatsapp_confirmado !== null && x.whatsapp_confirmado !== undefined);
+  $("verify-wa").hidden = !data.verificacao_whatsapp;
+  $("verify-wa").textContent = current.verified ? "Confirmar WhatsApp de novo" : "Confirmar WhatsApp";
+  current.rows = (data.leads || []).map(x => ({
+    title: x.nome, phone: x.telefone, emails: (x.emails || []).join(", "), website: x.site,
+    category: x.categoria, address: x.endereco, review_rating: x.nota == null ? "" : String(x.nota),
+    review_count: x.avaliacoes ? String(x.avaliacoes) : "", whatsapp: x.whatsapp, wa_confirmed: x.whatsapp_confirmado,
+    instagram: x.instagram, facebook: x.facebook, linkedin: x.linkedin, relevante: x.relevante,
+  }));
+  current.enriched = false;
+  applyEnrichment(loadEnrichment(current.id));
+}
+
+// Asks the Prospecta WhatsApp server, through /leads, whether each number has WhatsApp.
+$("verify-wa").onclick = async () => {
+  if (!current) return;
+  const job = current, btn = $("verify-wa"), msg = $("enrich-msg");
+  btn.disabled = true; msg.hidden = false;
+  msg.textContent = "Confirmando cada número no WhatsApp, um por vez. Leva uns 2 segundos por empresa; não feche a página.";
+  try {
+    const r = await api("/leads/buscas/" + encodeURIComponent(job.id) + "?relevantes=0&verificar_whatsapp=1");
+    const data = await r.json();
+    if (current !== job) return;
+    loadLeads(data); renderResults();
+    const ok = current.rows.filter(x => x.wa_confirmed === true).length, checked = current.rows.filter(x => x.wa_confirmed !== null && x.wa_confirmed !== undefined).length;
+    msg.textContent = "Pronto: " + ok + " de " + checked + " números têm WhatsApp. Os que não têm ficam marcados como \"sem WhatsApp\" e saem do link.";
+  } catch (e) {
+    msg.textContent = "Não consegui confirmar: " + e.message;
+  } finally { btn.disabled = false; }
+};
+
 function filtered() {
   const q = $("filter").value.trim().toLowerCase();
   return current.rows.filter(r =>
     (!$("only-email").checked || r.emails) &&
     (!$("only-phone").checked || r.phone) &&
+    (!$("only-wa").checked || (r.whatsapp && r.wa_confirmed !== false)) &&
     (!$("only-relevant").checked || r.relevante !== false) &&
     (!q || (r.title + " " + r.category + " " + r.address).toLowerCase().includes(q)));
 }
@@ -504,10 +531,10 @@ function link(href, text) { const a = document.createElement("a"); a.href = href
 function renderResults() {
   const all = $("only-relevant").checked ? current.rows.filter(r => r.relevante !== false) : current.rows, rows = filtered();
   const withSocial = all.filter(r => SOCIAL.some(k => r[k])).length;
-  const n = all.length, withEmail = all.filter(r => r.emails).length, withPhone = all.filter(r => r.phone).length, withWa = all.filter(r => r.whatsapp).length;
+  const n = all.length, withEmail = all.filter(r => r.emails).length, withPhone = all.filter(r => r.phone).length, withWa = all.filter(r => r.whatsapp && r.wa_confirmed !== false).length;
   const pct = (x) => n ? " (" + Math.round(100 * x / n) + "%)" : "";
   const stats = $("stats"); stats.textContent = "";
-  for (const [label, val] of [["Empresas", n], ["Com telefone", withPhone + pct(withPhone)], ["Celular / WhatsApp", withWa + pct(withWa)], ["Com e-mail", withEmail + pct(withEmail)], ...(current.enriched ? [["Com redes sociais", withSocial + pct(withSocial)]] : [])]) {
+  for (const [label, val] of [["Empresas", n], ["Com telefone", withPhone + pct(withPhone)], [current.verified ? "WhatsApp (confirmado ou provável)" : "Com WhatsApp provável", withWa + pct(withWa)], ["Com e-mail", withEmail + pct(withEmail)], ...(current.enriched ? [["Com redes sociais", withSocial + pct(withSocial)]] : [])]) {
     const s = document.createElement("span"); s.append(label + ": "); const b = document.createElement("b"); b.textContent = val; s.append(b); stats.append(s);
   }
   if (rows.length !== n) { const s = document.createElement("span"); s.textContent = "Mostrando " + rows.length; stats.append(s); }
@@ -521,7 +548,16 @@ function renderResults() {
   for (const r of rows) {
     const tr = document.createElement("tr");
     const t = cell(); const nm = document.createElement("div"); nm.textContent = r.title; const sub = document.createElement("div"); sub.className = "sub"; sub.textContent = r.category; t.append(nm, sub);
-    const p = cell("", "nowrap"); if (r.phone) { p.append(r.phone); if (r.whatsapp) { p.append(document.createElement("br")); const a = link(r.whatsapp, "WhatsApp ↗"); a.className = "wa"; p.append(a); } }
+    const p = cell("", "nowrap");
+    if (r.phone) p.append(r.phone);
+    if (r.whatsapp && r.wa_confirmed !== false) {
+      if (r.phone) p.append(document.createElement("br"));
+      const a = link(r.whatsapp, r.wa_confirmed ? "WhatsApp ✓" : "WhatsApp ↗"); a.className = "wa";
+      if (r.wa_confirmed) a.title = "Confirmado no WhatsApp";
+      p.append(a);
+    } else if (r.wa_confirmed === false) {
+      const s = document.createElement("div"); s.className = "sub"; s.textContent = "sem WhatsApp"; p.append(s);
+    }
     const e = cell(r.emails);
     const w = cell(); if (r.website) { const href = /^https?:\/\//i.test(r.website) ? r.website : "https://" + r.website; w.append(link(href, r.website.replace(/^https?:\/\/(www\.)?/i, "").replace(/\/$/, ""))); }
     const so = cell(); const box = document.createElement("div"); box.className = "socials";
@@ -533,10 +569,13 @@ function renderResults() {
   }
 }
 
-for (const id of ["filter", "only-email", "only-phone", "only-relevant"]) $(id).addEventListener("input", () => current && renderResults());
+for (const id of ["filter", "only-email", "only-phone", "only-wa", "only-relevant"]) $(id).addEventListener("input", () => current && renderResults());
 $("dl-clean").onclick = () => {
   if (!current) return;
-  saveFile(slug(current.name) + ".csv", toCSV(filtered(), [...LEAD, "whatsapp", ...(current.enriched ? SOCIAL : [])]), "text/csv;charset=utf-8");
+  saveFile(slug(current.name) + ".csv", toCSV(filtered().map(r => ({ ...r,
+    whatsapp: r.wa_confirmed === false ? "" : r.whatsapp,
+    wa_ok: r.wa_confirmed === true ? "sim" : r.wa_confirmed === false ? "não" : "" })),
+    [...LEAD, "whatsapp", ...(current.verified ? ["wa_ok"] : []), ...(current.enriched ? SOCIAL : [])]), "text/csv;charset=utf-8");
 };
 
 // ---------- Redes sociais e e-mails extras (enrich.py no servidor) ----------
@@ -554,6 +593,7 @@ function applyEnrichment(map) {
     if (!x) continue;
     for (const k of SOCIAL) if (x[k]) r[k] = x[k];
     if (!r.emails && x.emails) r.emails = x.emails;
+    if (!r.whatsapp && x.whatsapp) r.whatsapp = "https://wa.me/" + x.whatsapp;
   }
   current.enriched = true;
   $("enrich").textContent = "Buscar de novo";

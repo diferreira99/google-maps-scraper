@@ -52,6 +52,15 @@ Cada lead:
 }
 ```
 
+**WhatsApp:** `whatsapp` vem preenchido para celulares, para links de WhatsApp que o Google tinha no
+lugar do site e, com `?enriquecer=1`, para o botão de WhatsApp encontrado no site da empresa
+(`whatsapp_origem` diz de onde veio). Com `?verificar_whatsapp=1`, cada número é confirmado no
+servidor `prospecta-whatsapp` (`/check-number`), um por vez, com 2 segundos entre consultas:
+`whatsapp_confirmado` vira `true` ou `false`, e telefones fixos com WhatsApp Business ganham o link.
+O resultado fica guardado, então cada número só é consultado uma vez. `?whatsapp=1` filtra quem tem
+WhatsApp e não foi descartado na confirmação. Precisa das variáveis `WHATSAPP_CHECK_URL` e
+`WHATSAPP_CHECK_TOKEN` (o `API_TOKEN` do `prospecta-whatsapp`).
+
 **Outras rotas:** `GET /leads/buscas` lista as buscas e `DELETE /leads/buscas/<id>` apaga uma.
 
 **O que a limpeza faz:**

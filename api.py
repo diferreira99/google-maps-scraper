@@ -17,9 +17,14 @@ http(s) hosts: every hop (including redirects) must resolve to a public IP, and 
 links and emails are returned, never page content.
 
 Run: python3 api.py [--addr 127.0.0.1] [--port 8082]
-Env: ENGINE_URL (default http://127.0.0.1:8081), CACHE_DIR (default /gmapsdata/leads-cache)
+WhatsApp check (optional): ?verificar_whatsapp=1 on GET /leads/buscas/{id} asks the Prospecta
+WhatsApp server (/check-number) whether each lead's number has WhatsApp, one at a time.
+
+Env: ENGINE_URL (default http://127.0.0.1:8081), CACHE_DIR (default /gmapsdata/leads-cache),
+     WHATSAPP_CHECK_URL + WHATSAPP_CHECK_TOKEN (Prospecta server and its API_TOKEN),
+     WHATSAPP_CHECK_DELAY_S (pause between checks, default 2)
 """
-import argparse, csv, io, ipaddress, json, os, re, socket, sys, threading, unicodedata
+import argparse, csv, io, ipaddress, json, os, re, socket, sys, threading, time, unicodedata
 import urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +36,9 @@ MAX_SITES = 20
 MAX_BODY = 64_000
 ENGINE = os.environ.get("ENGINE_URL", "http://127.0.0.1:8081").rstrip("/")
 CACHE_DIR = os.environ.get("CACHE_DIR", "/gmapsdata/leads-cache")
+WA_CHECK_URL = os.environ.get("WHATSAPP_CHECK_URL", "").rstrip("/")
+WA_CHECK_TOKEN = os.environ.get("WHATSAPP_CHECK_TOKEN", "")
+WA_CHECK_DELAY = float(os.environ.get("WHATSAPP_CHECK_DELAY_S", "2"))
 STATUS_PT = {"pending": "na_fila", "working": "buscando", "ok": "pronta", "failed": "falhou"}
 csv.field_size_limit(10**9)
 
@@ -79,9 +87,24 @@ def safe_fetch_html(url, timeout=10):
 scrape._fetch_html = safe_fetch_html
 
 
+# WhatsApp buttons on business sites: wa.me/5512..., api.whatsapp.com/send?phone=..., whatsapp://send?phone=...
+WA_LINK_RE = re.compile(r"(?:wa\.me/|whatsapp\.com/send/?\?(?:[^\"'\s<>]*?&(?:amp;)?)?phone=|whatsapp://send/?\?phone=)"
+                        r"(?:%2B|\+)?([\d\s().-]{10,20})", re.I)
+
+
+def find_whatsapp(html):
+    """First Brazilian-looking WhatsApp number linked on the page, as E.164 digits, or ''."""
+    for m in WA_LINK_RE.finditer(html or ""):
+        digits, _ = br_phone(m.group(1))
+        if digits:
+            return digits
+    return ""
+
+
 def enrich_site(site):
     home = scrape._fetch_cached(site)
     out = scrape._find_socials(home)
+    out["whatsapp"] = find_whatsapp(home)
     emails = scrape.extract_emails(home, site)
     if home and not emails:
         pages = "".join(safe_fetch_html(u, timeout=8) for u in scrape.contact_links(home, site))
@@ -229,6 +252,7 @@ def clean_rows(rows, keywords):
         site, extras = clean_site(r.get("website", ""))
         e164, mobile = br_phone(r.get("phone", ""))
         wa = extras.get("whatsapp_numero") or (e164 if mobile else "")
+        origin = "link_google" if extras.get("whatsapp_numero") else ("celular" if wa else "")
         emails = clean_emails(r.get("emails", ""), site)
         try:
             rating = float(r.get("review_rating") or 0) or None
@@ -245,6 +269,8 @@ def clean_rows(rows, keywords):
             "telefone_e164": "+" + e164 if e164 else "",
             "celular": mobile,
             "whatsapp": "https://wa.me/" + wa if wa else extras.get("whatsapp_link", ""),
+            "whatsapp_origem": origin if wa else ("link_google" if extras.get("whatsapp_link") else ""),
+            "whatsapp_confirmado": None,
             "email": emails[0] if emails else "",
             "emails": emails,
             "site": site,
@@ -301,10 +327,82 @@ def apply_enrichment(leads, found):
         for k in ("instagram", "facebook", "linkedin"):
             if x.get(k) and not lead[k]:
                 lead[k] = x[k]
+        if x.get("whatsapp") and not lead["whatsapp"]:
+            lead["whatsapp"], lead["whatsapp_origem"] = "https://wa.me/" + x["whatsapp"], "site"
         if x.get("emails"):
             extra = [e for e in clean_emails(x["emails"], lead["site"]) if e not in lead["emails"]]
             lead["emails"] = clean_emails(", ".join(lead["emails"] + extra), lead["site"])
             lead["email"] = lead["emails"][0] if lead["emails"] else ""
+
+
+# ── WhatsApp check through the Prospecta WhatsApp server ─────────────────────
+_wa_lock = threading.Lock()
+WA_CACHE_FILE = "whatsapp-check.json"
+
+
+def _wa_cache():
+    try:
+        with open(os.path.join(CACHE_DIR, WA_CACHE_FILE)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _wa_cache_save(cache):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(os.path.join(CACHE_DIR, WA_CACHE_FILE), "w") as f:
+            json.dump(cache, f)
+    except OSError:
+        pass
+
+
+def check_whatsapp(number):
+    """True/False from the Prospecta server's /check-number for E.164 digits."""
+    req = urllib.request.Request(WA_CHECK_URL + "/check-number", method="POST",
+                                 data=json.dumps({"phone": number}).encode(),
+                                 headers={"Content-Type": "application/json", "x-api-token": WA_CHECK_TOKEN})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return bool(json.loads(r.read()).get("exists"))
+    except urllib.error.HTTPError as e:
+        if e.code == 503:
+            raise EngineError(503, "o WhatsApp do Prospecta não está conectado; conecte pelo /qr e tente de novo")
+        if e.code == 401:
+            raise EngineError(502, "o token do Prospecta (WHATSAPP_CHECK_TOKEN) foi recusado")
+        raise EngineError(502, f"o servidor do Prospecta respondeu HTTP {e.code}")
+    except OSError as e:
+        raise EngineError(502, f"não consegui falar com o servidor do Prospecta: {e}")
+
+
+def _wa_digits(lead):
+    m = re.search(r"wa\.me/(\d{10,15})", lead["whatsapp"] or "")
+    return m.group(1) if m else lead["telefone_e164"].lstrip("+")
+
+
+def verify_whatsapp(leads, run_checks):
+    """Fill whatsapp_confirmado from the cache, and when run_checks is set, ask the Prospecta
+    server about the numbers not checked yet (one at a time, with a pause between calls).
+    A landline that turns out to have WhatsApp (WhatsApp Business) gets its wa.me link."""
+    with _wa_lock:
+        cache = _wa_cache()
+        if run_checks:
+            if not (WA_CHECK_URL and WA_CHECK_TOKEN):
+                raise EngineError(501, "verificação de WhatsApp não configurada (WHATSAPP_CHECK_URL e WHATSAPP_CHECK_TOKEN)")
+            todo = list(dict.fromkeys(n for n in map(_wa_digits, leads) if n and n not in cache))
+            try:
+                for i, n in enumerate(todo):
+                    if i:
+                        time.sleep(WA_CHECK_DELAY)
+                    cache[n] = check_whatsapp(n)
+            finally:
+                _wa_cache_save(cache)
+    for lead in leads:
+        n = _wa_digits(lead)
+        if n in cache:
+            lead["whatsapp_confirmado"] = cache[n]
+            if cache[n] and not lead["whatsapp"]:
+                lead["whatsapp"], lead["whatsapp_origem"] = "https://wa.me/" + n, "verificado"
 
 
 # ── Engine access ────────────────────────────────────────────────────────────
@@ -388,14 +486,18 @@ def get_leads(job_id, q):
                 save_cache(job_id, found)
     if found:
         apply_enrichment(leads, found)
+    verify_whatsapp(leads, q.get("verificar_whatsapp") == "1")
     total = len(leads)
     if q.get("relevantes", "1") != "0":
         leads = [x for x in leads if x["relevante"]]
     if q.get("celular") == "1":
         leads = [x for x in leads if x["celular"]]
+    if q.get("whatsapp") == "1":   # has a WhatsApp link that was not ruled out by the check
+        leads = [x for x in leads if x["whatsapp"] and x["whatsapp_confirmado"] is not False]
     if q.get("email") == "1":
         leads = [x for x in leads if x["email"]]
-    return {**summary, "enriquecida": bool(found), "total_bruto": total, "total": len(leads), "leads": leads}
+    return {**summary, "enriquecida": bool(found), "verificacao_whatsapp": bool(WA_CHECK_URL and WA_CHECK_TOKEN),
+            "total_bruto": total, "total": len(leads), "leads": leads}
 
 
 def create_search(body):
