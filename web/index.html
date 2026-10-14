@@ -116,7 +116,7 @@ button.danger.armed { background: var(--bad); color: var(--surface); border-colo
 .pill.ok { background: var(--ok-soft); color: var(--ok); }
 .pill.working, .pill.pending { background: var(--run-soft); color: var(--run); }
 .pill.working::before { animation: pulse 1.2s ease-in-out infinite; }
-.pill.failed { background: var(--bad-soft); color: var(--bad); }
+.pill.failed, .pill.stuck { background: var(--bad-soft); color: var(--bad); }
 @keyframes pulse { 50% { opacity: .25; } }
 @media (prefers-reduced-motion: reduce) { .pill.working::before { animation: none; } }
 .empty { color: var(--muted); font-size: 14px; border: 1px dashed var(--line); border-radius: 8px; padding: 18px; margin: 0; }
@@ -253,7 +253,14 @@ const API = "/api/v1/jobs";
 const LEAD = ["title", "phone", "emails", "website", "category", "address", "review_rating", "review_count"];
 const HEAD_PT = { title: "Empresa", phone: "Telefone", emails: "E-mail", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Nota", review_count: "Avaliações", whatsapp: "WhatsApp", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
 const SOCIAL = ["instagram", "facebook", "linkedin"];
-const STATUS_PT = { pending: "na fila", working: "buscando", ok: "pronta", failed: "falhou" };
+const STATUS_PT = { pending: "na fila", working: "buscando", ok: "pronta", failed: "falhou", stuck: "interrompida" };
+// The engine marks a job "working" and never revisits it if the server restarts mid-run.
+// Past its time limit plus a margin, treat it as interrupted so it can be deleted or redone.
+function isStuck(j) {
+  if (j.Status !== "working") return false;
+  const limitS = ((j.Data && j.Data.max_time) || 0) / 1e9 || 600;   // API returns max_time in nanoseconds
+  return Date.now() - new Date(j.Date).getTime() > (limitS + 600) * 1000;
+}
 const $ = (id) => document.getElementById(id);
 
 let jobs = [];
@@ -356,7 +363,7 @@ async function loadJobs() {
 
 function schedulePoll() {
   clearTimeout(pollTimer);
-  if (jobs.some(j => j.Status === "pending" || j.Status === "working")) pollTimer = setTimeout(loadJobs, 6000);
+  if (jobs.some(j => j.Status === "pending" || (j.Status === "working" && !isStuck(j)))) pollTimer = setTimeout(loadJobs, 6000);
 }
 
 function renderJobs() {
@@ -373,8 +380,9 @@ function renderJobs() {
     const meta = document.createElement("div"); meta.className = "job-meta";
     meta.textContent = [fmtDate(j.Date), kws.length + (kws.length === 1 ? " termo" : " termos"), "prof. " + ((j.Data && j.Data.depth) || "?")].join(" · ");
     name.append(n, meta);
+    const status = isStuck(j) ? "stuck" : j.Status;
     const pill = document.createElement("span");
-    pill.className = "pill " + j.Status; pill.textContent = STATUS_PT[j.Status] || j.Status;
+    pill.className = "pill " + status; pill.textContent = STATUS_PT[status] || status;
     top.append(name, pill);
     li.append(top);
 
@@ -384,7 +392,12 @@ function renderJobs() {
       v.onclick = () => openResults(j);
       act.append(v);
     }
-    if (j.Status !== "working") {
+    if (status === "stuck" || status === "failed") {
+      const redo = document.createElement("button"); redo.type = "button"; redo.className = "small"; redo.textContent = "Refazer";
+      redo.onclick = () => redoJob(j, redo);
+      act.append(redo);
+    }
+    if (status !== "working") {
       const del = document.createElement("button"); del.type = "button"; del.className = "small danger"; del.textContent = "Apagar";
       del.onclick = () => {
         if (!del.classList.contains("armed")) {
@@ -396,7 +409,12 @@ function renderJobs() {
       };
       act.append(del);
     }
-    if (j.Status === "failed") {
+    if (status === "stuck") {
+      const s = document.createElement("span"); s.className = "hint";
+      s.textContent = "O servidor reiniciou durante esta busca. Clique em Refazer para rodar de novo.";
+      act.append(s);
+    }
+    if (status === "failed") {
       const s = document.createElement("span"); s.className = "hint";
       s.textContent = "Pode ser bloqueio temporário do Google. Espere, reduza a profundidade ou use proxies.";
       act.append(s);
@@ -404,6 +422,22 @@ function renderJobs() {
     if (act.childNodes.length) li.append(act);
     ul.append(li);
   }
+}
+
+async function redoJob(j, btn) {
+  const d = j.Data || {};
+  const body = { name: j.Name, keywords: d.keywords, lang: d.lang || "pt", zoom: d.zoom || 15, lat: d.lat, lon: d.lon,
+    fast_mode: !!d.fast_mode, radius: d.radius || 10000, depth: d.depth || 5, email: !!d.email,
+    max_time: Math.round((d.max_time || 600e9) / 1e9) };
+  if (d.proxies && d.proxies.length) body.proxies = d.proxies;
+  btn.disabled = true;
+  try {
+    await api(API, { method: "POST", body: JSON.stringify(body) });
+    await api(API + "/" + encodeURIComponent(j.ID), { method: "DELETE" });
+  } catch (e) {
+    $("jobs-err").textContent = "Não consegui refazer: " + e.message; $("jobs-err").hidden = false;
+  }
+  loadJobs();
 }
 
 async function deleteJob(j) {
