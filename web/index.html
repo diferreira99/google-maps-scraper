@@ -178,6 +178,7 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
             </select>
           </div>
         </div>
+        <label class="check"><input type="checkbox" id="grid"> Cidade inteira: divide a cidade em 9 regiões e busca cada uma (mais resultados, cerca de 9 vezes mais demorado)</label>
         <details>
           <summary>Opções avançadas</summary>
           <div class="grid">
@@ -250,19 +251,14 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
 </div>
 
 <script>
-const API = "/api/v1/jobs";
 // Spreadsheet columns, in order. Socials stay empty until "Buscar redes sociais" runs.
 const LEAD = ["title", "category", "phone", "whatsapp", "review_rating", "review_count", "website", "instagram", "facebook", "linkedin", "address"];
 const HEAD_PT = { title: "Empresa", phone: "Telefone", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Avaliação", review_count: "Nº de avaliações", whatsapp: "WhatsApp", wa_ok: "WhatsApp confirmado", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
 const SOCIAL = ["instagram", "facebook", "linkedin"];
-const STATUS_PT = { pending: "na fila", working: "buscando", ok: "pronta", failed: "falhou", stuck: "interrompida" };
-// The engine marks a job "working" and never revisits it if the server restarts mid-run.
-// Past its time limit plus a margin, treat it as interrupted so it can be deleted or redone.
-function isStuck(j) {
-  if (j.Status !== "working") return false;
-  const limitS = ((j.Data && j.Data.max_time) || 0) / 1e9 || 600;   // API returns max_time in nanoseconds
-  return Date.now() - new Date(j.Date).getTime() > (limitS + 600) * 1000;
-}
+// Searches go through /leads/buscas, which groups a "cidade inteira" search (one engine job per
+// region) into a single entry and reports searches cut off by a restart as "interrompida".
+const LEADS = "/leads/buscas";
+const STATUS_PT = { na_fila: "na fila", buscando: "buscando", pronta: "pronta", falhou: "falhou", interrompida: "interrompida" };
 const $ = (id) => document.getElementById(id);
 
 let jobs = [];
@@ -278,15 +274,6 @@ async function api(path, opts = {}) {
     throw new Error(msg);
   }
   return r;
-}
-
-async function geocode(place) {
-  const q = new URLSearchParams({ format: "json", limit: "1", q: place });
-  const r = await fetch("https://nominatim.openstreetmap.org/search?" + q, { headers: { "Accept-Language": "pt-BR" } });
-  if (!r.ok) throw new Error("Não consegui localizar a cidade (serviço de mapas respondeu " + r.status + ").");
-  const hits = await r.json();
-  if (!hits.length) throw new Error("Não encontrei \"" + place + "\". Tente no formato Cidade, UF.");
-  return { lat: String(hits[0].lat), lon: String(hits[0].lon) };
 }
 
 // ---------- CSV ----------
@@ -319,9 +306,8 @@ function fmtDate(iso) {
 
 async function loadJobs() {
   try {
-    const r = await api(API);
-    const data = await r.json();
-    jobs = (Array.isArray(data) ? data : []).sort((a, b) => new Date(b.Date) - new Date(a.Date));
+    const r = await api(LEADS);
+    jobs = (await r.json()).buscas || [];
     $("jobs-err").hidden = true;
   } catch (e) {
     $("jobs-err").textContent = "Não consegui falar com o scraper: " + e.message + ". Se o serviço acabou de reiniciar, espere um minuto e clique em Atualizar.";
@@ -333,7 +319,7 @@ async function loadJobs() {
 
 function schedulePoll() {
   clearTimeout(pollTimer);
-  if (jobs.some(j => j.Status === "pending" || (j.Status === "working" && !isStuck(j)))) pollTimer = setTimeout(loadJobs, 6000);
+  if (jobs.some(j => j.status === "na_fila" || j.status === "buscando")) pollTimer = setTimeout(loadJobs, 6000);
 }
 
 function renderJobs() {
@@ -342,35 +328,36 @@ function renderJobs() {
   $("jobs-empty").hidden = jobs.length > 0;
   for (const j of jobs) {
     const li = document.createElement("li");
-    li.className = "job" + (current && current.id === j.ID ? " selected" : "");
-    const kws = (j.Data && j.Data.keywords) || [];
+    li.className = "job" + (current && current.id === j.id ? " selected" : "");
+    const kws = j.termos || [];
     const top = document.createElement("div"); top.className = "job-top";
     const name = document.createElement("div");
-    const n = document.createElement("div"); n.className = "job-name"; n.textContent = j.Name || kws[0] || "Busca";
+    const n = document.createElement("div"); n.className = "job-name"; n.textContent = j.nome || kws[0] || "Busca";
     const meta = document.createElement("div"); meta.className = "job-meta";
-    meta.textContent = [fmtDate(j.Date), kws.length + (kws.length === 1 ? " termo" : " termos"), "prof. " + ((j.Data && j.Data.depth) || "?")].join(" · ");
+    meta.textContent = [fmtDate(j.criada_em), kws.length + (kws.length === 1 ? " termo" : " termos"), "prof. " + (j.profundidade || "?"),
+      ...(j.grade ? [j.regioes_prontas + " de " + j.regioes + " regiões prontas"] : [])].join(" · ");
     name.append(n, meta);
-    const status = isStuck(j) ? "stuck" : j.Status;
+    const status = j.status;
     const pill = document.createElement("span");
     pill.className = "pill " + status; pill.textContent = STATUS_PT[status] || status;
     top.append(name, pill);
     li.append(top);
 
     const act = document.createElement("div"); act.className = "job-actions";
-    if (status === "ok" || status === "working" || status === "stuck") {
+    if (status === "pronta" || status === "buscando" || status === "interrompida") {
       // The engine writes the CSV as it goes, so a running or interrupted job already has partial results.
       const v = document.createElement("button"); v.type = "button"; v.className = "small";
-      v.textContent = status === "ok" ? "Ver resultados" : "Ver parciais";
+      v.textContent = status === "pronta" ? "Ver resultados" : "Ver parciais";
       v.onclick = () => openResults(j);
       act.append(v);
     }
-    if (status === "stuck" || status === "failed") {
+    if (status === "interrompida" || status === "falhou") {
       const redo = document.createElement("button"); redo.type = "button"; redo.className = "small"; redo.textContent = "Refazer";
       redo.onclick = () => redoJob(j, redo);
       act.append(redo);
     }
     {
-      const label = status === "working" ? "Parar e apagar" : "Apagar";
+      const label = status === "buscando" || status === "na_fila" ? "Parar e apagar" : "Apagar";
       const del = document.createElement("button"); del.type = "button"; del.className = "small danger"; del.textContent = label;
       del.onclick = () => {
         if (!del.classList.contains("armed")) {
@@ -382,12 +369,17 @@ function renderJobs() {
       };
       act.append(del);
     }
-    if (status === "stuck") {
+    if (status === "pronta" && j.regioes_com_erro) {
+      const s = document.createElement("span"); s.className = "hint";
+      s.textContent = j.regioes_com_erro + " de " + j.regioes + " regiões falharam; os resultados cobrem as outras.";
+      act.append(s);
+    }
+    if (status === "interrompida") {
       const s = document.createElement("span"); s.className = "hint";
       s.textContent = "O servidor reiniciou durante esta busca. Clique em Refazer para rodar de novo.";
       act.append(s);
     }
-    if (status === "failed") {
+    if (status === "falhou") {
       const s = document.createElement("span"); s.className = "hint";
       s.textContent = "Pode ser bloqueio temporário do Google. Espere, reduza a profundidade ou use proxies.";
       act.append(s);
@@ -398,15 +390,10 @@ function renderJobs() {
 }
 
 async function redoJob(j, btn) {
-  const d = j.Data || {};
-  const body = { name: j.Name, keywords: d.keywords, lang: d.lang || "pt", zoom: d.zoom || 15, lat: d.lat, lon: d.lon,
-    fast_mode: !!d.fast_mode, radius: d.radius || 10000, depth: d.depth || 5, email: false,
-    max_time: Math.round((d.max_time || 600e9) / 1e9) };
-  if (d.proxies && d.proxies.length) body.proxies = d.proxies;
   btn.disabled = true;
   try {
-    await api(API, { method: "POST", body: JSON.stringify(body) });
-    await api(API + "/" + encodeURIComponent(j.ID), { method: "DELETE" });
+    await api(LEADS + "/" + encodeURIComponent(j.id) + "/refazer", { method: "POST" });
+    if (current && current.id === j.id) { current = null; $("results").hidden = true; }
   } catch (e) {
     $("jobs-err").textContent = "Não consegui refazer: " + e.message; $("jobs-err").hidden = false;
   }
@@ -415,8 +402,8 @@ async function redoJob(j, btn) {
 
 async function deleteJob(j) {
   try {
-    await api(API + "/" + encodeURIComponent(j.ID), { method: "DELETE" });
-    if (current && current.id === j.ID) { current = null; $("results").hidden = true; }
+    await api(LEADS + "/" + encodeURIComponent(j.id), { method: "DELETE" });
+    if (current && current.id === j.id) { current = null; $("results").hidden = true; }
   } catch (e) {
     $("jobs-err").textContent = "Não consegui apagar: " + e.message; $("jobs-err").hidden = false;
   }
@@ -431,21 +418,16 @@ $("form").addEventListener("submit", async (ev) => {
   const terms = $("kw").value.split("\n").map(s => s.trim()).filter(Boolean);
   if (!terms.length) { err.textContent = "Escreva pelo menos uma busca, por exemplo: dentistas."; err.hidden = false; $("kw").focus(); return; }
   if (!city) { err.textContent = "Informe a cidade, por exemplo: Belo Horizonte, MG."; err.hidden = false; $("city").focus(); return; }
-  const go = $("go"); go.disabled = true; go.textContent = "Localizando a cidade…";
+  const go = $("go"); go.disabled = true; go.textContent = "Enviando…";
   try {
-    const { lat, lon } = await geocode(city);
-    const cityShort = city.split(",")[0].trim();
-    const keywords = terms.map(t => t.toLowerCase().includes(cityShort.toLowerCase()) ? t : t + " em " + city);
     const proxies = $("proxies").value.split("\n").map(s => s.trim()).filter(Boolean);
     const body = {
-      name: terms[0] + (terms.length > 1 ? " +" + (terms.length - 1) : "") + " · " + cityShort,
-      keywords, lang: $("lang").value, zoom: 15, lat, lon, fast_mode: false,
-      radius: Number($("radius").value) || 10000, depth: Number($("depth").value),
-      email: false, max_time: Number($("maxtime").value),
+      buscas: terms, cidade: city, idioma: $("lang").value, profundidade: Number($("depth").value),
+      raio_m: Number($("radius").value) || 10000, tempo_limite_min: Math.round(Number($("maxtime").value) / 60),
     };
+    if ($("grid").checked) body.grade = 3;
     if (proxies.length) body.proxies = proxies;
-    go.textContent = "Enviando…";
-    await api(API, { method: "POST", body: JSON.stringify(body) });
+    await api(LEADS, { method: "POST", body: JSON.stringify(body) });
     $("kw").value = "";
     await loadJobs();
   } catch (e) {
@@ -462,15 +444,17 @@ async function openResults(j) {
   $("results").hidden = false;
   $("stats").textContent = "Carregando resultados…";
   $("rows").textContent = "";
-  current = { id: j.ID, name: j.Name, rows: [], enriched: false };
+  current = { id: j.id, name: j.nome, rows: [], enriched: false };
   $("enrich").textContent = "Buscar redes sociais"; $("enrich").disabled = false; $("enrich-msg").hidden = true;
   renderJobs();
-  $("dl-full").href = API + "/" + encodeURIComponent(j.ID) + "/download";
-  $("dl-full").setAttribute("download", slug(j.Name) + "-completo.csv");
+  // The raw engine CSV exists per engine job, so a whole-city search has none to offer.
+  $("dl-full").hidden = !!j.grade;
+  $("dl-full").href = "/api/v1/jobs/" + encodeURIComponent(j.id) + "/download";
+  $("dl-full").setAttribute("download", slug(j.nome) + "-completo.csv");
   try {
     // /leads does the cleaning (phones, WhatsApp, sites, socials, off-topic results) on the server,
     // the same way integrations like Prospecta get it.
-    const r = await api("/leads/buscas/" + encodeURIComponent(j.ID) + "?relevantes=0");
+    const r = await api("/leads/buscas/" + encodeURIComponent(j.id) + "?relevantes=0");
     loadLeads(await r.json());
     renderResults();
     $("results").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });

@@ -32,6 +32,13 @@ Opcionais: `"buscas": ["contabilidade", "assessoria contábil"]` no lugar de `bu
 `"profundidade": 5`, `"tempo_limite_min": 20`, `"raio_m": 10000`, `"proxies": [...]`.
 Resposta: `{"id": "...", "status": "na_fila", ...}`. O servidor roda uma busca por vez.
 
+**Cidade inteira (opcional):** `"grade": 3` divide a cidade em 3 x 3 = 9 regiões e busca cada uma
+(o Google mostra no máximo uns 120 resultados por busca, então uma cidade grande precisa de várias).
+Vira uma busca só na API: o `status` só fica `pronta` quando todas as regiões terminam, e
+`regioes`/`regioes_prontas`/`regioes_com_erro` mostram o andamento. Os resultados juntam as regiões,
+tiram as repetidas e descartam o que cai fora dos limites da cidade. Leva cerca de 9 vezes mais tempo
+e faz 9 vezes mais acessos ao Google; `"grade"` aceita de 2 a 5.
+
 **Acompanhar e pegar os leads:** `GET /leads/buscas/<id>`
 
 `status` passa por `na_fila`, `buscando` e `pronta` (ou `falhou`). Os leads já aparecem durante a busca
@@ -63,7 +70,9 @@ O resultado fica guardado, então cada número só é consultado uma vez. `?what
 WhatsApp e não foi descartado na confirmação. Precisa das variáveis `WHATSAPP_CHECK_URL` e
 `WHATSAPP_CHECK_TOKEN` (o `API_TOKEN` do `prospecta-whatsapp`).
 
-**Outras rotas:** `GET /leads/buscas` lista as buscas e `DELETE /leads/buscas/<id>` apaga uma.
+**Outras rotas:** `GET /leads/buscas` lista as buscas, `DELETE /leads/buscas/<id>` apaga uma (numa
+grade, apaga todas as regiões) e `POST /leads/buscas/<id>/refazer` coloca a mesma busca na fila de novo
+e apaga a antiga. O `status` `interrompida` marca uma busca cortada por um reinício do servidor.
 
 **O que a limpeza faz:**
 - tira duplicadas e junta dois cadastros da mesma empresa (mesmo telefone no mesmo endereço) num só

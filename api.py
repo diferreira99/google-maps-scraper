@@ -25,7 +25,8 @@ Env: ENGINE_URL (default http://127.0.0.1:8081), CACHE_DIR (default /gmapsdata/l
      WHATSAPP_CHECK_URL + WHATSAPP_CHECK_TOKEN (Prospecta server and its API_TOKEN),
      WHATSAPP_CHECK_DELAY_S (pause between checks, default 2)
 """
-import argparse, csv, io, ipaddress, json, os, re, socket, sys, threading, time, unicodedata
+import argparse, csv, io, ipaddress, json, os, re, socket, sys, threading, time, unicodedata, uuid
+from datetime import datetime, timezone
 import urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -435,11 +436,100 @@ def engine(method, path, body=None, timeout=60):
         raise EngineError(503, f"scraper engine unavailable: {e}")
 
 
+def _parse_date(value):
+    """Engine dates carry up to nanoseconds ('...27.123456789Z'); Python takes microseconds."""
+    m = re.match(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)?$", value or "")
+    if not m:
+        return None
+    frac = (m.group(2) or "0")[:6].ljust(6, "0")
+    tz = m.group(3) or "Z"
+    return datetime.fromisoformat(f"{m.group(1)}.{frac}{'+00:00' if tz == 'Z' else tz}")
+
+
+def job_status(j):
+    """Engine status in Portuguese. A job still 'working' well past its time limit was cut off by a
+    server restart (the engine never picks it up again), so it is reported as 'interrompida'."""
+    st = j.get("Status")
+    if st == "working":
+        started = _parse_date(j.get("Date"))
+        limit_s = ((j.get("Data") or {}).get("max_time") or 0) / 1e9 or 1200
+        if started and (datetime.now(timezone.utc) - started).total_seconds() > limit_s + 600:
+            return "interrompida"
+    return STATUS_PT.get(st, st)
+
+
 def job_summary(j):
     d = j.get("Data") or {}
-    return {"id": j.get("ID"), "nome": j.get("Name"), "status": STATUS_PT.get(j.get("Status"), j.get("Status")),
+    return {"id": j.get("ID"), "nome": j.get("Name"), "status": job_status(j),
             "criada_em": j.get("Date"), "termos": d.get("keywords") or [], "profundidade": d.get("depth"),
-            "tempo_limite_min": round((d.get("max_time") or 0) / 60e9) or None}
+            "tempo_limite_min": round((d.get("max_time") or 0) / 60e9) or None, "grade": None, "regioes": 1}
+
+
+# ── Grid searches: one search split into N x N map regions, run as N*N engine jobs ──
+# The group lives in a small JSON file on the volume; the engine only knows the member jobs.
+_group_lock = threading.Lock()
+
+
+def _group_dir():
+    return os.path.join(CACHE_DIR, "grades")
+
+
+def _group_path(gid):
+    return os.path.join(_group_dir(), re.sub(r"[^A-Za-z0-9-]", "", gid) + ".json")
+
+
+def load_group(gid):
+    try:
+        with open(_group_path(gid)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_group(g):
+    with _group_lock:
+        os.makedirs(_group_dir(), exist_ok=True)
+        with open(_group_path(g["id"]), "w") as f:
+            json.dump(g, f, ensure_ascii=False)
+
+
+def list_groups():
+    try:
+        names = os.listdir(_group_dir())
+    except OSError:
+        return []
+    return [g for g in (load_group(n.removesuffix(".json")) for n in names if n.endswith(".json")) if g]
+
+
+def group_summary(g, jobs_by_id):
+    statuses = [job_status(jobs_by_id[j]) if j in jobs_by_id else "interrompida" for j in g["jobs"]]
+    done = statuses.count("pronta")
+    bad = sum(s in ("falhou", "interrompida") for s in statuses)
+    if done == len(statuses):
+        status = "pronta"
+    elif any(s in ("na_fila", "buscando") for s in statuses):
+        status = "buscando" if (done or bad or "buscando" in statuses) else "na_fila"
+    elif done:
+        status = "pronta"   # finished, some regions failed: results cover the others
+    else:
+        status = "falhou" if "falhou" in statuses else "interrompida"
+    return {"id": g["id"], "nome": g["nome"], "status": status, "criada_em": g["criada_em"],
+            "termos": g["termos"], "profundidade": g.get("profundidade"), "tempo_limite_min": g.get("tempo_limite_min"),
+            "grade": g["grade"], "regioes": len(g["jobs"]), "regioes_prontas": done, "regioes_com_erro": bad}
+
+
+def _engine_jobs():
+    _, raw = engine("GET", "/api/v1/jobs")
+    return {j.get("ID"): j for j in (json.loads(raw) or [])}
+
+
+def list_searches():
+    jobs = _engine_jobs()
+    groups = list_groups()
+    members = {j for g in groups for j in g["jobs"]}
+    out = [group_summary(g, jobs) for g in groups]
+    out += [job_summary(j) for jid, j in jobs.items() if jid not in members]
+    return sorted(out, key=lambda x: x.get("criada_em") or "", reverse=True)
 
 
 _cache_lock = threading.Lock()
@@ -467,17 +557,30 @@ def save_cache(job_id, found):
             pass
 
 
-def get_leads(job_id, q):
-    _, raw = engine("GET", "/api/v1/jobs/" + urllib.parse.quote(job_id))
-    job = json.loads(raw)
-    summary = job_summary(job)
-    leads = []
+def _job_rows(job_id):
+    """Raw CSV rows the engine has written for a job so far ([] if nothing yet)."""
     try:
         _, csv_raw = engine("GET", "/api/v1/jobs/" + urllib.parse.quote(job_id) + "/download", timeout=120)
-        leads = clean_rows(csv.DictReader(io.StringIO(csv_raw.decode("utf-8", "replace"))), summary["termos"])
     except EngineError as e:
         if e.code != 404:   # 404 = nothing written yet
             raise
+        return []
+    return list(csv.DictReader(io.StringIO(csv_raw.decode("utf-8", "replace"))))
+
+
+def get_leads(job_id, q):
+    group = load_group(job_id)
+    if group:
+        jobs = _engine_jobs()
+        summary = group_summary(group, jobs)
+        rows = [r for jid in group["jobs"] if jid in jobs for r in _job_rows(jid)]
+        # Region searches leak past the city edge; keep what falls inside the city box (+10%).
+        rows = [r for r in rows if scrape.in_bbox(r, group["bbox"])]
+    else:
+        _, raw = engine("GET", "/api/v1/jobs/" + urllib.parse.quote(job_id))
+        summary = job_summary(json.loads(raw))
+        rows = _job_rows(job_id)
+    leads = clean_rows(rows, summary["termos"]) if rows else []
     found = load_cache(job_id)
     if q.get("enriquecer") == "1" and leads:
         sites = sorted({lead["site"] for lead in leads if lead["site"]} - set((found or {}).keys()))
@@ -503,14 +606,58 @@ def get_leads(job_id, q):
             "total_bruto": total, "total": len(leads), "leads": leads}
 
 
-def create_search(body):
+def _search_terms(body):
     terms = body.get("buscas") or ([body["busca"]] if body.get("busca") else [])
     if isinstance(terms, str):
         terms = [terms]
-    terms = [t.strip() for t in terms if isinstance(t, str) and t.strip()]
+    return [t.strip() for t in terms if isinstance(t, str) and t.strip()]
+
+
+def create_grid_search(body, terms, city, grade):
+    """Split the city's bounding box into grade x grade regions and queue one engine job per
+    region, searching the bare terms around each region's center. Google caps a search at about
+    120 results, so a big city needs several viewports to be covered."""
+    if not city:
+        raise EngineError(400, 'a busca em grade precisa de "cidade"')
+    geo = scrape.geocode(city, with_bbox=True)
+    if not geo or not geo[2]:
+        raise EngineError(400, f'não encontrei os limites da cidade "{city}"; use o formato "Cidade, UF"')
+    bbox = [float(x) for x in geo[2]]
+    short = city.split(",")[0].strip()
+    name = body.get("nome") or (terms[0] + (f" +{len(terms) - 1}" if len(terms) > 1 else "") + f" · {short} (cidade inteira)")
+    minutes = int(body.get("tempo_limite_min", 20))
+    cells = scrape.grid_cells(bbox, grade)
+    ids = []
+    for i, cell in enumerate(cells, 1):
+        job = {"name": f"{name} · região {i}/{len(cells)}", "keywords": terms, "lang": body.get("idioma", "pt"),
+               "zoom": cell["zoom"], "lat": cell["lat"], "lon": cell["lon"], "fast_mode": False,
+               "radius": cell["radius"], "depth": int(body.get("profundidade", 10)), "email": False,
+               "max_time": minutes * 60}
+        if body.get("proxies"):
+            job["proxies"] = body["proxies"]
+        _, raw = engine("POST", "/api/v1/jobs", job)
+        ids.append(json.loads(raw).get("id"))
+    group = {"id": str(uuid.uuid4()), "nome": name, "termos": terms, "cidade": city, "bbox": bbox, "grade": grade,
+             "jobs": ids, "profundidade": int(body.get("profundidade", 10)), "tempo_limite_min": minutes,
+             "criada_em": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "pedido": body}
+    save_group(group)
+    return {"id": group["id"], "status": "na_fila", "nome": name, "termos": terms, "grade": grade, "regioes": len(ids)}
+
+
+def create_search(body):
+    terms = _search_terms(body)
     city = (body.get("cidade") or "").strip()
     if not terms:
         raise EngineError(400, 'informe "busca" (texto) ou "buscas" (lista), por exemplo "contabilidade"')
+    grade = body.get("grade")
+    if grade:
+        try:
+            grade = int(grade)
+        except (TypeError, ValueError):
+            grade = 0
+        if not 2 <= grade <= 5:
+            raise EngineError(400, '"grade" vai de 2 a 5 (3 divide a cidade em 9 regiões)')
+        return create_grid_search(body, terms, city, grade)
     lat, lon = body.get("lat"), body.get("lon")
     if not (lat and lon):
         if not city:
@@ -531,6 +678,42 @@ def create_search(body):
         job["proxies"] = body["proxies"]
     _, raw = engine("POST", "/api/v1/jobs", job)
     return {"id": json.loads(raw).get("id"), "status": "na_fila", "nome": job["name"], "termos": keywords}
+
+
+def delete_search(sid):
+    group = load_group(sid)
+    for jid in (group["jobs"] if group else [sid]):
+        try:
+            engine("DELETE", "/api/v1/jobs/" + urllib.parse.quote(jid))
+        except EngineError as e:
+            if not group or e.code != 404:
+                raise
+    for path in ([_group_path(sid)] if group else []) + [cache_path(sid)]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def redo_search(sid):
+    """Queue the same search again and delete the old one (for failed or interrupted searches)."""
+    group = load_group(sid)
+    if group:
+        new = create_search(group["pedido"])
+    else:
+        _, raw = engine("GET", "/api/v1/jobs/" + urllib.parse.quote(sid))
+        j = json.loads(raw)
+        d = j.get("Data") or {}
+        job = {"name": j.get("Name"), "keywords": d.get("keywords"), "lang": d.get("lang") or "pt",
+               "zoom": d.get("zoom") or 15, "lat": d.get("lat"), "lon": d.get("lon"), "fast_mode": False,
+               "radius": d.get("radius") or 10000, "depth": d.get("depth") or 10, "email": False,
+               "max_time": round((d.get("max_time") or 1200e9) / 1e9)}
+        if d.get("proxies"):
+            job["proxies"] = d["proxies"]
+        _, raw = engine("POST", "/api/v1/jobs", job)
+        new = {"id": json.loads(raw).get("id"), "status": "na_fila", "nome": job["name"]}
+    delete_search(sid)
+    return new
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
@@ -569,20 +752,17 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and path == "/enrich":
                 return self._enrich()
             if path == "/leads/buscas" and method == "GET":
-                _, raw = engine("GET", "/api/v1/jobs")
-                jobs = sorted(json.loads(raw) or [], key=lambda j: j.get("Date") or "", reverse=True)
-                return self._json(200, {"buscas": [job_summary(j) for j in jobs]})
+                return self._json(200, {"buscas": list_searches()})
             if path == "/leads/buscas" and method == "POST":
                 return self._json(201, create_search(self._body()))
             if m and method == "GET":
                 return self._json(200, get_leads(m.group(1), q))
             if m and method == "DELETE":
-                engine("DELETE", "/api/v1/jobs/" + m.group(1))
-                try:
-                    os.remove(cache_path(m.group(1)))
-                except OSError:
-                    pass
+                delete_search(m.group(1))
                 return self._json(200, {"apagada": m.group(1)})
+            redo = re.fullmatch(r"/leads/buscas/([A-Za-z0-9-]{1,64})/refazer", path)
+            if redo and method == "POST":
+                return self._json(201, redo_search(redo.group(1)))
             self._json(404, {"erro": "rota não encontrada"})
         except EngineError as e:
             self._json(e.code if 400 <= e.code < 600 else 502, {"erro": str(e)})
