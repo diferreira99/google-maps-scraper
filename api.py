@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Clean leads API on top of the scraper engine, plus the socials/email lookup the search page uses.
+"""Clean leads API on top of the scraper engine, plus the socials lookup the search page uses.
 
 Clean leads (for Prospecta, n8n or any other integration):
   POST   /leads/buscas          {"busca": "contabilidade", "cidade": "São José dos Campos, SP", ...}
   GET    /leads/buscas          list searches and their status
-  GET    /leads/buscas/{id}     status + cleaned leads (JSON). Filters: ?celular=1 ?email=1
+  GET    /leads/buscas/{id}     status + cleaned leads (JSON). Filters: ?celular=1 ?whatsapp=1
                                 ?relevantes=0 (include off-topic results) ?enriquecer=1 (visit sites
-                                for socials and extra emails; cached on disk after the first call)
+                                for socials and WhatsApp buttons; cached on disk after the first call)
   DELETE /leads/buscas/{id}
 
 Socials lookup used by the page:
@@ -14,7 +14,7 @@ Socials lookup used by the page:
 
 Every endpoint is reachable from the public URL with no auth, so site visits only go to public
 http(s) hosts: every hop (including redirects) must resolve to a public IP, and only the extracted
-links and emails are returned, never page content.
+links are returned, never page content.
 
 Run: python3 api.py [--addr 127.0.0.1] [--port 8082]
 WhatsApp check (optional): ?verificar_whatsapp=1 on GET /leads/buscas/{id} starts asking the
@@ -106,36 +106,10 @@ def enrich_site(site):
     home = scrape._fetch_cached(site)
     out = scrape._find_socials(home)
     out["whatsapp"] = find_whatsapp(home)
-    emails = scrape.extract_emails(home, site)
-    if home and not emails:
-        pages = "".join(safe_fetch_html(u, timeout=8) for u in scrape.contact_links(home, site))
-        emails = scrape.extract_emails(pages, site)
-    out["emails"] = ", ".join(emails)
     return out
 
 
 # ── Cleaning ─────────────────────────────────────────────────────────────────
-_PLACEHOLDER_LOCAL = {"first.last", "firstname.lastname", "nome", "seunome", "exemplo", "example", "test", "teste"}
-_JOB_LOCAL = re.compile(r"^(vagas?|curriculos?|curriculum|rh|trabalheconosco|jobs?|careers?)[._-]?", re.I)
-
-
-def clean_emails(raw, site=""):
-    """Split, decode and validate the engine's comma-joined emails. Drops placeholders and
-    junk domains, puts recruiting addresses last and addresses on the site's domain first."""
-    out = []
-    for e in re.split(r"[,;\s]+", raw or ""):
-        e = urllib.parse.unquote(e).strip().strip(".<>()[]'\"").lower()
-        e = e.removeprefix("mailto:")
-        local, _, dom = e.rpartition("@")
-        if (not scrape.EMAIL_RE.fullmatch(e) or e.endswith(scrape._JUNK_EXT) or local in scrape._JUNK_LOCAL
-                or local in _PLACEHOLDER_LOCAL or any(j in dom for j in scrape._JUNK_DOMAIN) or e in out):
-            continue
-        out.append(e)
-    host = scrape._host(site) if site else ""
-    on_site = lambda e: bool(host) and (e.endswith("@" + host) or e.endswith("." + host))
-    return sorted(out, key=lambda e: (bool(_JOB_LOCAL.match(e)), not on_site(e)))
-
-
 def br_phone(raw):
     """-> (e164 digits like '5512978113132' or '', is_mobile). Brazilian numbers only get the
     mobile flag: 55 + 2-digit area code + 9 + 8 digits."""
@@ -254,7 +228,6 @@ def clean_rows(rows, keywords):
         e164, mobile = br_phone(r.get("phone", ""))
         wa = extras.get("whatsapp_numero") or (e164 if mobile else "")
         origin = "link_google" if extras.get("whatsapp_numero") else ("celular" if wa else "")
-        emails = clean_emails(r.get("emails", ""), site)
         try:
             rating = float(r.get("review_rating") or 0) or None
         except ValueError:
@@ -272,8 +245,6 @@ def clean_rows(rows, keywords):
             "whatsapp": "https://wa.me/" + wa if wa else extras.get("whatsapp_link", ""),
             "whatsapp_origem": origin if wa else ("link_google" if extras.get("whatsapp_link") else ""),
             "whatsapp_confirmado": None,
-            "email": emails[0] if emails else "",
-            "emails": emails,
             "site": site,
             "instagram": extras.get("instagram", ""),
             "facebook": extras.get("facebook", ""),
@@ -308,10 +279,8 @@ def merge_same_business(leads):
             continue
         main, extra = (other, lead) if other["avaliacoes"] >= lead["avaliacoes"] else (lead, other)
         for k, v in extra.items():
-            if k != "emails" and not main.get(k) and v:
+            if not main.get(k) and v:
                 main[k] = v
-        main["emails"] = main["emails"] + [e for e in extra["emails"] if e not in main["emails"]]
-        main["email"] = main["emails"][0] if main["emails"] else ""
         main["relevante"] = main["relevante"] or extra["relevante"]
         main.setdefault("outros_nomes", []).append(extra["nome"])
         if main is lead:
@@ -330,10 +299,6 @@ def apply_enrichment(leads, found):
                 lead[k] = x[k]
         if x.get("whatsapp") and not lead["whatsapp"]:
             lead["whatsapp"], lead["whatsapp_origem"] = "https://wa.me/" + x["whatsapp"], "site"
-        if x.get("emails"):
-            extra = [e for e in clean_emails(x["emails"], lead["site"]) if e not in lead["emails"]]
-            lead["emails"] = clean_emails(", ".join(lead["emails"] + extra), lead["site"])
-            lead["email"] = lead["emails"][0] if lead["emails"] else ""
 
 
 # ── WhatsApp check through the Prospecta WhatsApp server ─────────────────────
@@ -474,7 +439,7 @@ def job_summary(j):
     d = j.get("Data") or {}
     return {"id": j.get("ID"), "nome": j.get("Name"), "status": STATUS_PT.get(j.get("Status"), j.get("Status")),
             "criada_em": j.get("Date"), "termos": d.get("keywords") or [], "profundidade": d.get("depth"),
-            "emails": d.get("email"), "tempo_limite_min": round((d.get("max_time") or 0) / 60e9) or None}
+            "tempo_limite_min": round((d.get("max_time") or 0) / 60e9) or None}
 
 
 _cache_lock = threading.Lock()
@@ -533,8 +498,6 @@ def get_leads(job_id, q):
         leads = [x for x in leads if x["celular"]]
     if q.get("whatsapp") == "1":   # has a WhatsApp link that was not ruled out by the check
         leads = [x for x in leads if x["whatsapp"] and x["whatsapp_confirmado"] is not False]
-    if q.get("email") == "1":
-        leads = [x for x in leads if x["email"]]
     return {**summary, "enriquecida": bool(found), "verificacao_whatsapp": bool(WA_CHECK_URL and WA_CHECK_TOKEN),
             "verificacao": whatsapp_check_status(job_id),
             "total_bruto": total, "total": len(leads), "leads": leads}
@@ -562,7 +525,7 @@ def create_search(body):
         "name": body.get("nome") or (terms[0] + (f" +{len(terms) - 1}" if len(terms) > 1 else "") + (f" · {short}" if short else "")),
         "keywords": keywords, "lang": body.get("idioma", "pt"), "zoom": 15, "lat": str(lat), "lon": str(lon),
         "fast_mode": False, "radius": int(body.get("raio_m", 10000)), "depth": int(body.get("profundidade", 5)),
-        "email": bool(body.get("emails", True)), "max_time": int(body.get("tempo_limite_min", 20)) * 60,
+        "email": False, "max_time": int(body.get("tempo_limite_min", 20)) * 60,
     }
     if body.get("proxies"):
         job["proxies"] = body["proxies"]

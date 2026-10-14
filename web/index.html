@@ -178,7 +178,6 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
             </select>
           </div>
         </div>
-        <label class="check"><input type="checkbox" id="email" checked> Buscar e-mails nos sites das empresas (mais lento)</label>
         <details>
           <summary>Opções avançadas</summary>
           <div class="grid">
@@ -223,7 +222,7 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
     <div class="panel-head">
       <h2 id="t-res">Resultados</h2>
       <div class="toolbar">
-        <button type="button" class="small" id="enrich">Buscar redes sociais e mais e-mails</button>
+        <button type="button" class="small" id="enrich">Buscar redes sociais</button>
         <button type="button" class="small" id="verify-wa" hidden>Confirmar WhatsApp</button>
         <button type="button" class="small" id="dl-clean">Baixar planilha</button>
         <a class="btn small" id="dl-full" href="#">CSV completo (34 colunas)</a>
@@ -233,28 +232,28 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
     <p class="msg info" id="enrich-msg" hidden></p>
     <div class="toolbar">
       <input type="text" id="filter" placeholder="Filtrar por nome, categoria, bairro…" aria-label="Filtrar resultados">
-      <label class="check"><input type="checkbox" id="only-email"> Só com e-mail</label>
       <label class="check"><input type="checkbox" id="only-phone"> Só com telefone</label>
       <label class="check"><input type="checkbox" id="only-wa"> Só com WhatsApp</label>
       <label class="check"><input type="checkbox" id="only-relevant" checked> Só do tema da busca</label>
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Empresa</th><th>Telefone</th><th>E-mail</th><th>Site</th><th>Redes</th><th>Nota</th><th>Endereço</th></tr></thead>
+        <thead><tr><th>Empresa</th><th>Telefone</th><th>Avaliação</th><th>Site</th><th>Redes sociais</th><th>Endereço</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
   </section>
 
   <footer>
-    Raspar o Google Maps viola os Termos de Serviço do Google, e telefones e e-mails são dados pessoais: use com a LGPD em mente (base legal, opção de descadastro, nada de spam). Muitas buscas seguidas podem fazer o Google bloquear o servidor por algumas horas; rode uma por vez.
+    Raspar o Google Maps viola os Termos de Serviço do Google, e telefones são dados pessoais: use com a LGPD em mente (base legal, opção de descadastro, nada de spam). Muitas buscas seguidas podem fazer o Google bloquear o servidor por algumas horas; rode uma por vez.
   </footer>
 </div>
 
 <script>
 const API = "/api/v1/jobs";
-const LEAD = ["title", "phone", "emails", "website", "category", "address", "review_rating", "review_count"];
-const HEAD_PT = { title: "Empresa", phone: "Telefone", emails: "E-mail", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Nota", review_count: "Avaliações", whatsapp: "WhatsApp", wa_ok: "WhatsApp confirmado", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
+// Spreadsheet columns, in order. Socials stay empty until "Buscar redes sociais" runs.
+const LEAD = ["title", "phone", "whatsapp", "review_rating", "review_count", "website", "instagram", "facebook", "linkedin", "address"];
+const HEAD_PT = { title: "Empresa", phone: "Telefone", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Avaliação", review_count: "Nº de avaliações", whatsapp: "WhatsApp", wa_ok: "WhatsApp confirmado", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
 const SOCIAL = ["instagram", "facebook", "linkedin"];
 const STATUS_PT = { pending: "na fila", working: "buscando", ok: "pronta", failed: "falhou", stuck: "interrompida" };
 // The engine marks a job "working" and never revisits it if the server restarts mid-run.
@@ -401,7 +400,7 @@ function renderJobs() {
 async function redoJob(j, btn) {
   const d = j.Data || {};
   const body = { name: j.Name, keywords: d.keywords, lang: d.lang || "pt", zoom: d.zoom || 15, lat: d.lat, lon: d.lon,
-    fast_mode: !!d.fast_mode, radius: d.radius || 10000, depth: d.depth || 5, email: !!d.email,
+    fast_mode: !!d.fast_mode, radius: d.radius || 10000, depth: d.depth || 5, email: false,
     max_time: Math.round((d.max_time || 600e9) / 1e9) };
   if (d.proxies && d.proxies.length) body.proxies = d.proxies;
   btn.disabled = true;
@@ -442,7 +441,7 @@ $("form").addEventListener("submit", async (ev) => {
       name: terms[0] + (terms.length > 1 ? " +" + (terms.length - 1) : "") + " · " + cityShort,
       keywords, lang: $("lang").value, zoom: 15, lat, lon, fast_mode: false,
       radius: Number($("radius").value) || 10000, depth: Number($("depth").value),
-      email: $("email").checked, max_time: Number($("maxtime").value),
+      email: false, max_time: Number($("maxtime").value),
     };
     if (proxies.length) body.proxies = proxies;
     go.textContent = "Enviando…";
@@ -464,12 +463,12 @@ async function openResults(j) {
   $("stats").textContent = "Carregando resultados…";
   $("rows").textContent = "";
   current = { id: j.ID, name: j.Name, rows: [], enriched: false };
-  $("enrich").textContent = "Buscar redes sociais e mais e-mails"; $("enrich").disabled = false; $("enrich-msg").hidden = true;
+  $("enrich").textContent = "Buscar redes sociais"; $("enrich").disabled = false; $("enrich-msg").hidden = true;
   renderJobs();
   $("dl-full").href = API + "/" + encodeURIComponent(j.ID) + "/download";
   $("dl-full").setAttribute("download", slug(j.Name) + "-completo.csv");
   try {
-    // /leads does the cleaning (emails, phones, WhatsApp, sites, off-topic results) on the server,
+    // /leads does the cleaning (phones, WhatsApp, sites, socials, off-topic results) on the server,
     // the same way integrations like Prospecta get it.
     const r = await api("/leads/buscas/" + encodeURIComponent(j.ID) + "?relevantes=0");
     loadLeads(await r.json());
@@ -488,7 +487,7 @@ function loadLeads(data) {
   $("verify-wa").hidden = !data.verificacao_whatsapp;
   $("verify-wa").textContent = current.verified ? "Confirmar WhatsApp de novo" : "Confirmar WhatsApp";
   current.rows = (data.leads || []).map(x => ({
-    title: x.nome, phone: x.telefone, emails: (x.emails || []).join(", "), website: x.site,
+    title: x.nome, phone: x.telefone, website: x.site,
     category: x.categoria, address: x.endereco, review_rating: x.nota == null ? "" : String(x.nota),
     review_count: x.avaliacoes ? String(x.avaliacoes) : "", whatsapp: x.whatsapp, wa_confirmed: x.whatsapp_confirmado,
     instagram: x.instagram, facebook: x.facebook, linkedin: x.linkedin, relevante: x.relevante,
@@ -539,7 +538,6 @@ $("verify-wa").onclick = () => { if (current) { $("verify-wa").disabled = true; 
 function filtered() {
   const q = $("filter").value.trim().toLowerCase();
   return current.rows.filter(r =>
-    (!$("only-email").checked || r.emails) &&
     (!$("only-phone").checked || r.phone) &&
     (!$("only-wa").checked || (r.whatsapp && r.wa_confirmed !== false)) &&
     (!$("only-relevant").checked || r.relevante !== false) &&
@@ -552,10 +550,10 @@ function link(href, text) { const a = document.createElement("a"); a.href = href
 function renderResults() {
   const all = $("only-relevant").checked ? current.rows.filter(r => r.relevante !== false) : current.rows, rows = filtered();
   const withSocial = all.filter(r => SOCIAL.some(k => r[k])).length;
-  const n = all.length, withEmail = all.filter(r => r.emails).length, withPhone = all.filter(r => r.phone).length, withWa = all.filter(r => r.whatsapp && r.wa_confirmed !== false).length;
+  const n = all.length, withPhone = all.filter(r => r.phone).length, withWa = all.filter(r => r.whatsapp && r.wa_confirmed !== false).length;
   const pct = (x) => n ? " (" + Math.round(100 * x / n) + "%)" : "";
   const stats = $("stats"); stats.textContent = "";
-  for (const [label, val] of [["Empresas", n], ["Com telefone", withPhone + pct(withPhone)], [current.verified ? "WhatsApp (confirmado ou provável)" : "Com WhatsApp provável", withWa + pct(withWa)], ["Com e-mail", withEmail + pct(withEmail)], ...(current.enriched ? [["Com redes sociais", withSocial + pct(withSocial)]] : [])]) {
+  for (const [label, val] of [["Empresas", n], ["Com telefone", withPhone + pct(withPhone)], [current.verified ? "WhatsApp (confirmado ou provável)" : "Com WhatsApp provável", withWa + pct(withWa)], ...(current.enriched ? [["Com redes sociais", withSocial + pct(withSocial)]] : [])]) {
     const s = document.createElement("span"); s.append(label + ": "); const b = document.createElement("b"); b.textContent = val; s.append(b); stats.append(s);
   }
   if (rows.length !== n) { const s = document.createElement("span"); s.textContent = "Mostrando " + rows.length; stats.append(s); }
@@ -564,7 +562,7 @@ function renderResults() {
   if (!n) {
     const tr = document.createElement("tr"); const td = cell(current.status === "pronta"
       ? "A busca terminou sem resultados. Tente aumentar o raio, a profundidade ou usar um termo mais amplo."
-      : "Esta busca ainda não gravou nenhum resultado. Espere um pouco e clique em Ver parciais de novo."); td.colSpan = 7; tr.append(td); tb.append(tr); return;
+      : "Esta busca ainda não gravou nenhum resultado. Espere um pouco e clique em Ver parciais de novo."); td.colSpan = 6; tr.append(td); tb.append(tr); return;
   }
   for (const r of rows) {
     const tr = document.createElement("tr");
@@ -579,27 +577,26 @@ function renderResults() {
     } else if (r.wa_confirmed === false) {
       const s = document.createElement("div"); s.className = "sub"; s.textContent = "sem WhatsApp"; p.append(s);
     }
-    const e = cell(r.emails);
     const w = cell(); if (r.website) { const href = /^https?:\/\//i.test(r.website) ? r.website : "https://" + r.website; w.append(link(href, r.website.replace(/^https?:\/\/(www\.)?/i, "").replace(/\/$/, ""))); }
     const so = cell(); const box = document.createElement("div"); box.className = "socials";
     for (const [k, label] of [["instagram", "Instagram"], ["facebook", "Facebook"], ["linkedin", "LinkedIn"]]) if (r[k]) box.append(link(r[k], label + " ↗"));
     if (box.childNodes.length) so.append(box);
     const rt = cell(r.review_rating ? r.review_rating.replace(".", ",") + (r.review_count ? " · " + r.review_count : "") : "", "num");
     const ad = cell(r.address);
-    tr.append(t, p, e, w, so, rt, ad); tb.append(tr);
+    tr.append(t, p, rt, w, so, ad); tb.append(tr);
   }
 }
 
-for (const id of ["filter", "only-email", "only-phone", "only-wa", "only-relevant"]) $(id).addEventListener("input", () => current && renderResults());
+for (const id of ["filter", "only-phone", "only-wa", "only-relevant"]) $(id).addEventListener("input", () => current && renderResults());
 $("dl-clean").onclick = () => {
   if (!current) return;
   saveFile(slug(current.name) + ".csv", toCSV(filtered().map(r => ({ ...r,
     whatsapp: r.wa_confirmed === false ? "" : r.whatsapp,
     wa_ok: r.wa_confirmed === true ? "sim" : r.wa_confirmed === false ? "não" : "" })),
-    [...LEAD, "whatsapp", ...(current.verified ? ["wa_ok"] : []), ...(current.enriched ? SOCIAL : [])]), "text/csv;charset=utf-8");
+    current.verified ? LEAD.flatMap(c => c === "whatsapp" ? ["whatsapp", "wa_ok"] : [c]) : LEAD), "text/csv;charset=utf-8");
 };
 
-// ---------- Redes sociais e e-mails extras (enrich.py no servidor) ----------
+// ---------- Redes sociais e WhatsApp dos sites (api.py no servidor) ----------
 function enrichKey(id) { return "gm-enrich-" + id; }
 function loadEnrichment(id) {
   try { return JSON.parse(localStorage.getItem(enrichKey(id)) || "null"); } catch { return null; }
@@ -613,7 +610,6 @@ function applyEnrichment(map) {
     const x = r.website && map[r.website];
     if (!x) continue;
     for (const k of SOCIAL) if (x[k]) r[k] = x[k];
-    if (!r.emails && x.emails) r.emails = x.emails;
     if (!r.whatsapp && x.whatsapp) r.whatsapp = "https://wa.me/" + x.whatsapp;
   }
   current.enriched = true;
@@ -644,7 +640,7 @@ $("enrich").onclick = async () => {
   btn.disabled = false;
   msg.textContent = failed === sites.length
     ? "Não consegui consultar os sites agora. Se o serviço acabou de reiniciar, espere um minuto e tente de novo."
-    : "Pronto: " + sites.length + (sites.length === 1 ? " site visitado" : " sites visitados") + (failed ? " (" + failed + " não responderam)" : "") + ". As colunas Instagram, Facebook e LinkedIn entram na planilha.";
+    : "Pronto: " + sites.length + (sites.length === 1 ? " site visitado" : " sites visitados") + (failed ? " (" + failed + " não responderam)" : "") + ". As redes sociais encontradas entram na planilha.";
 };
 
 // Lembra a última cidade usada neste navegador.

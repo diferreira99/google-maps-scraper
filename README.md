@@ -1,7 +1,7 @@
 # Google Maps Scraper
 
-Extrai listas de empresas do Google Maps (nome, telefone, e-mail, site, categoria, endereço, nota e
-número de avaliações) para prospecção. Adaptado do
+Extrai listas de empresas do Google Maps (nome, telefone, WhatsApp, avaliação, site, redes sociais e
+endereço) para prospecção. Adaptado do
 [google-maps-scraper-kit](https://github.com/Mahanaicoach/google-maps-scraper-kit) (MIT, ver `LICENSE`),
 que usa o motor open-source [gosom/google-maps-scraper](https://github.com/gosom/google-maps-scraper).
 
@@ -11,9 +11,10 @@ Este guia reúne o que a skill do Claude Code do kit ensinava, para usar sem a s
 
 O `Dockerfile` sobe o motor e uma página em português (`web/index.html`) no mesmo endereço. Nela você
 digita o tipo de negócio e a cidade, acompanha as buscas e baixa a planilha já limpa (separada por `;`,
-abre direto no Excel), com link de WhatsApp para celulares. O botão **Buscar redes sociais e mais
-e-mails** visita o site de cada empresa (pelo `api.py`, no servidor) e acrescenta Instagram, Facebook,
-LinkedIn e e-mails das páginas de contato. Só funciona para empresas com site que divulgam essas redes
+abre direto no Excel) com Empresa, Telefone, WhatsApp, Avaliação, Site, Redes sociais e Endereço. As
+buscas não coletam e-mail, o que as deixa bem mais rápidas (3 a 6 minutos). O botão **Buscar redes
+sociais** visita a página inicial do site de cada empresa (pelo `api.py`, no servidor) e acrescenta
+Instagram, Facebook, LinkedIn e o botão de WhatsApp do site. Só funciona para empresas com site que divulgam essas redes
 (em geral de 40 a 70% delas). O Caddy serve a página em `/` e repassa
 `/api/*` para o motor, e `/leads` e `/enrich` para o `api.py`, que só acessa endereços públicos. A interface original do motor deixa de ficar acessível.
 
@@ -28,15 +29,15 @@ Endereço base: `https://google-maps-scraper-production-3f90.up.railway.app`. Se
 ```
 
 Opcionais: `"buscas": ["contabilidade", "assessoria contábil"]` no lugar de `busca`,
-`"profundidade": 5`, `"tempo_limite_min": 20`, `"emails": true`, `"raio_m": 10000`, `"proxies": [...]`.
+`"profundidade": 5`, `"tempo_limite_min": 20`, `"raio_m": 10000`, `"proxies": [...]`.
 Resposta: `{"id": "...", "status": "na_fila", ...}`. O servidor roda uma busca por vez.
 
 **Acompanhar e pegar os leads:** `GET /leads/buscas/<id>`
 
 `status` passa por `na_fila`, `buscando` e `pronta` (ou `falhou`). Os leads já aparecem durante a busca
-(parciais). Filtros: `?celular=1` (só celulares), `?email=1` (só com e-mail), `?relevantes=0` (inclui
+(parciais). Filtros: `?celular=1` (só celulares), `?whatsapp=1` (só com WhatsApp), `?relevantes=0` (inclui
 resultados fora do tema), `?enriquecer=1` (visita os sites e acrescenta Instagram, Facebook, LinkedIn e
-e-mails; leva de 1 a 3 minutos na primeira vez e fica guardado depois).
+o WhatsApp do site; leva de 1 a 2 minutos na primeira vez e fica guardado depois).
 
 Cada lead:
 
@@ -44,8 +45,7 @@ Cada lead:
 {
   "nome": "Ação Contábil", "categoria": "Escritório de contabilidade",
   "telefone": "+55 12 99114-2186", "telefone_e164": "+5512991142186", "celular": true,
-  "whatsapp": "https://wa.me/5512991142186",
-  "email": "contato@acaocontabilsjc.com.br", "emails": ["contato@acaocontabilsjc.com.br"],
+  "whatsapp": "https://wa.me/5512991142186", "whatsapp_origem": "celular", "whatsapp_confirmado": true,
   "site": "https://acaocontabilsjc.com.br/", "instagram": "", "facebook": "", "linkedin": "",
   "endereco": "Av. Dr. Ademar de Barros, 56 - ...", "nota": 5.0, "avaliacoes": 37,
   "google_maps": "https://www.google.com/maps/place/...", "place_id": "ChIJ...", "relevante": true
@@ -68,9 +68,7 @@ WhatsApp e não foi descartado na confirmação. Precisa das variáveis `WHATSAP
 **O que a limpeza faz:**
 - tira duplicadas e junta dois cadastros da mesma empresa (mesmo telefone no mesmo endereço) num só
   lead, guardando o outro nome em `outros_nomes`;
-- decodifica e valida e-mails, removendo exemplos (`contact@example.com`, `first.last@email.com`) e
-  deixando e-mails de vagas por último;
-- normaliza o telefone e marca se é celular; o WhatsApp só é preenchido para celular;
+- normaliza o telefone e marca se é celular; sem confirmação, o WhatsApp só é preenchido para celular;
 - quando o "site" do Google é um link de WhatsApp ou de rede social, move para o campo certo;
 - remove rastreamento (`utm_*`) do site e o nome da empresa repetido no início do endereço;
 - marca como `relevante: false` o que não tem a ver com a busca (por exemplo, empresa de software
