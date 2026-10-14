@@ -11,8 +11,11 @@ Este guia reúne o que a skill do Claude Code do kit ensinava, para usar sem a s
 
 O `Dockerfile` sobe o motor e uma página em português (`web/index.html`) no mesmo endereço. Nela você
 digita o tipo de negócio e a cidade, acompanha as buscas e baixa a planilha já limpa (separada por `;`,
-abre direto no Excel), com link de WhatsApp para celulares. O Caddy serve a página em `/` e repassa
-`/api/*` para o motor. A interface original do motor deixa de ficar acessível.
+abre direto no Excel), com link de WhatsApp para celulares. O botão **Buscar redes sociais e mais
+e-mails** visita o site de cada empresa (pelo `enrich.py`, no servidor) e acrescenta Instagram, Facebook,
+LinkedIn e e-mails das páginas de contato. Só funciona para empresas com site que divulgam essas redes
+(em geral de 40 a 70% delas). O Caddy serve a página em `/` e repassa
+`/api/*` para o motor e `/enrich` para o `enrich.py`, que só acessa endereços públicos. A interface original do motor deixa de ficar acessível.
 
 ## Como funciona
 

@@ -134,6 +134,7 @@ td .sub { color: var(--muted); font-size: 12.5px; }
 td a { color: var(--accent); }
 .nowrap { white-space: nowrap; }
 .wa { font-size: 12px; font-weight: 600; }
+.socials { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12.5px; font-weight: 600; }
 footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
 </style>
 </head>
@@ -222,11 +223,13 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
     <div class="panel-head">
       <h2 id="t-res">Resultados</h2>
       <div class="toolbar">
+        <button type="button" class="small" id="enrich">Buscar redes sociais e mais e-mails</button>
         <button type="button" class="small" id="dl-clean">Baixar planilha</button>
         <a class="btn small" id="dl-full" href="#">CSV completo (34 colunas)</a>
       </div>
     </div>
     <div class="stats" id="stats"></div>
+    <p class="msg info" id="enrich-msg" hidden></p>
     <div class="toolbar">
       <input type="text" id="filter" placeholder="Filtrar por nome, categoria, bairro…" aria-label="Filtrar resultados">
       <label class="check"><input type="checkbox" id="only-email"> Só com e-mail</label>
@@ -234,7 +237,7 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Empresa</th><th>Telefone</th><th>E-mail</th><th>Site</th><th>Nota</th><th>Endereço</th></tr></thead>
+        <thead><tr><th>Empresa</th><th>Telefone</th><th>E-mail</th><th>Site</th><th>Redes</th><th>Nota</th><th>Endereço</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -248,7 +251,8 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
 <script>
 const API = "/api/v1/jobs";
 const LEAD = ["title", "phone", "emails", "website", "category", "address", "review_rating", "review_count"];
-const HEAD_PT = { title: "Empresa", phone: "Telefone", emails: "E-mail", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Nota", review_count: "Avaliações", whatsapp: "WhatsApp" };
+const HEAD_PT = { title: "Empresa", phone: "Telefone", emails: "E-mail", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Nota", review_count: "Avaliações", whatsapp: "WhatsApp", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
+const SOCIAL = ["instagram", "facebook", "linkedin"];
 const STATUS_PT = { pending: "na fila", working: "buscando", ok: "pronta", failed: "falhou" };
 const $ = (id) => document.getElementById(id);
 
@@ -451,7 +455,8 @@ async function openResults(j) {
   $("results").hidden = false;
   $("stats").textContent = "Carregando resultados…";
   $("rows").textContent = "";
-  current = { id: j.ID, name: j.Name, rows: [] };
+  current = { id: j.ID, name: j.Name, rows: [], enriched: false };
+  $("enrich").textContent = "Buscar redes sociais e mais e-mails"; $("enrich").disabled = false; $("enrich-msg").hidden = true;
   renderJobs();
   $("dl-full").href = API + "/" + encodeURIComponent(j.ID) + "/download";
   $("dl-full").setAttribute("download", slug(j.Name) + "-completo.csv");
@@ -468,8 +473,11 @@ async function openResults(j) {
       o.emails = cleanEmails(o.emails);
       const w = waNumber(o.phone);
       o.whatsapp = w ? "https://wa.me/" + w : "";
+      for (const k of SOCIAL) o[k] = "";
       return o;
     });
+    current.enriched = false;
+    applyEnrichment(loadEnrichment(j.ID));
     renderResults();
     $("results").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
   } catch (e) {
@@ -490,17 +498,18 @@ function link(href, text) { const a = document.createElement("a"); a.href = href
 
 function renderResults() {
   const all = current.rows, rows = filtered();
+  const withSocial = all.filter(r => SOCIAL.some(k => r[k])).length;
   const n = all.length, withEmail = all.filter(r => r.emails).length, withPhone = all.filter(r => r.phone).length, withWa = all.filter(r => r.whatsapp).length;
   const pct = (x) => n ? " (" + Math.round(100 * x / n) + "%)" : "";
   const stats = $("stats"); stats.textContent = "";
-  for (const [label, val] of [["Empresas", n], ["Com telefone", withPhone + pct(withPhone)], ["Celular / WhatsApp", withWa + pct(withWa)], ["Com e-mail", withEmail + pct(withEmail)]]) {
+  for (const [label, val] of [["Empresas", n], ["Com telefone", withPhone + pct(withPhone)], ["Celular / WhatsApp", withWa + pct(withWa)], ["Com e-mail", withEmail + pct(withEmail)], ...(current.enriched ? [["Com redes sociais", withSocial + pct(withSocial)]] : [])]) {
     const s = document.createElement("span"); s.append(label + ": "); const b = document.createElement("b"); b.textContent = val; s.append(b); stats.append(s);
   }
   if (rows.length !== n) { const s = document.createElement("span"); s.textContent = "Mostrando " + rows.length; stats.append(s); }
 
   const tb = $("rows"); tb.textContent = "";
   if (!n) {
-    const tr = document.createElement("tr"); const td = cell("A busca terminou sem resultados. Tente aumentar o raio, a profundidade ou usar um termo mais amplo."); td.colSpan = 6; tr.append(td); tb.append(tr); return;
+    const tr = document.createElement("tr"); const td = cell("A busca terminou sem resultados. Tente aumentar o raio, a profundidade ou usar um termo mais amplo."); td.colSpan = 7; tr.append(td); tb.append(tr); return;
   }
   for (const r of rows) {
     const tr = document.createElement("tr");
@@ -508,16 +517,64 @@ function renderResults() {
     const p = cell("", "nowrap"); if (r.phone) { p.append(r.phone); if (r.whatsapp) { p.append(document.createElement("br")); const a = link(r.whatsapp, "WhatsApp ↗"); a.className = "wa"; p.append(a); } }
     const e = cell(r.emails);
     const w = cell(); if (r.website) { const href = /^https?:\/\//i.test(r.website) ? r.website : "https://" + r.website; w.append(link(href, r.website.replace(/^https?:\/\/(www\.)?/i, "").replace(/\/$/, ""))); }
+    const so = cell(); const box = document.createElement("div"); box.className = "socials";
+    for (const [k, label] of [["instagram", "Instagram"], ["facebook", "Facebook"], ["linkedin", "LinkedIn"]]) if (r[k]) box.append(link(r[k], label + " ↗"));
+    if (box.childNodes.length) so.append(box);
     const rt = cell(r.review_rating ? r.review_rating.replace(".", ",") + (r.review_count ? " · " + r.review_count : "") : "", "num");
     const ad = cell(r.address);
-    tr.append(t, p, e, w, rt, ad); tb.append(tr);
+    tr.append(t, p, e, w, so, rt, ad); tb.append(tr);
   }
 }
 
 for (const id of ["filter", "only-email", "only-phone"]) $(id).addEventListener("input", () => current && renderResults());
 $("dl-clean").onclick = () => {
   if (!current) return;
-  saveFile(slug(current.name) + ".csv", toCSV(filtered(), [...LEAD, "whatsapp"]), "text/csv;charset=utf-8");
+  saveFile(slug(current.name) + ".csv", toCSV(filtered(), [...LEAD, "whatsapp", ...(current.enriched ? SOCIAL : [])]), "text/csv;charset=utf-8");
+};
+
+// ---------- Redes sociais e e-mails extras (enrich.py no servidor) ----------
+function enrichKey(id) { return "gm-enrich-" + id; }
+function loadEnrichment(id) {
+  try { return JSON.parse(localStorage.getItem(enrichKey(id)) || "null"); } catch { return null; }
+}
+function saveEnrichment(id, map) {
+  try { localStorage.setItem(enrichKey(id), JSON.stringify(map)); } catch {}
+}
+function applyEnrichment(map) {
+  if (!map) return;
+  for (const r of current.rows) {
+    const x = r.website && map[r.website];
+    if (!x) continue;
+    for (const k of SOCIAL) if (x[k]) r[k] = x[k];
+    if (!r.emails && x.emails) r.emails = x.emails;
+  }
+  current.enriched = true;
+  $("enrich").textContent = "Buscar de novo";
+}
+
+$("enrich").onclick = async () => {
+  if (!current) return;
+  const job = current, btn = $("enrich"), msg = $("enrich-msg");
+  const sites = [...new Set(job.rows.map(r => r.website).filter(Boolean))];
+  if (!sites.length) { msg.textContent = "Nenhuma empresa desta busca tem site, então não há onde procurar redes sociais."; msg.hidden = false; return; }
+  btn.disabled = true; msg.hidden = false;
+  const map = {}; let done = 0, failed = 0;
+  for (let i = 0; i < sites.length; i += 10) {
+    if (current !== job) return;   // o usuário abriu outra busca
+    msg.textContent = "Visitando os sites das empresas: " + done + " de " + sites.length + "…";
+    try {
+      const r = await fetch("/enrich", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sites: sites.slice(i, i + 10) }) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      Object.assign(map, (await r.json()).results || {});
+    } catch { failed += Math.min(10, sites.length - i); }
+    done = Math.min(i + 10, sites.length);
+    applyEnrichment(map); renderResults();
+  }
+  saveEnrichment(job.id, map);
+  btn.disabled = false;
+  msg.textContent = failed === sites.length
+    ? "Não consegui consultar os sites agora. Se o serviço acabou de reiniciar, espere um minuto e tente de novo."
+    : "Pronto: " + sites.length + (sites.length === 1 ? " site visitado" : " sites visitados") + (failed ? " (" + failed + " não responderam)" : "") + ". As colunas Instagram, Facebook e LinkedIn entram na planilha.";
 };
 
 // Lembra a última cidade usada neste navegador.
