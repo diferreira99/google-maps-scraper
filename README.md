@@ -60,7 +60,10 @@ e faz 9 vezes mais acessos ao Google; `"grade"` aceita de 2 a 5.
 `status` passa por `na_fila`, `buscando` e `pronta` (ou `falhou`). Os leads já aparecem durante a busca
 (parciais). Filtros: `?celular=1` (só celulares), `?whatsapp=1` (só com WhatsApp), `?relevantes=0` (inclui
 resultados fora do tema), `?enriquecer=1` (visita os sites e acrescenta Instagram, Facebook, LinkedIn e
-o WhatsApp do site; leva de 1 a 2 minutos na primeira vez e fica guardado depois).
+o WhatsApp do site; leva de 1 a 2 minutos na primeira vez e fica guardado depois). Com
+`?enriquecer=fundo` a visita aos sites roda em segundo plano: a resposta volta na hora com
+`"enriquecimento": "andamento"` e, quando estiver `"pronto"`, os próximos GETs já trazem as redes (é o que o
+Prospecta+ usa).
 
 Cada lead:
 

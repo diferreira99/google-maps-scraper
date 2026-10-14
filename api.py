@@ -7,6 +7,8 @@ Clean leads (for Prospecta, n8n or any other integration):
   GET    /leads/buscas/{id}     status + cleaned leads (JSON). Filters: ?celular=1 ?whatsapp=1
                                 ?relevantes=0 (include off-topic results) ?enriquecer=1 (visit sites
                                 for socials and WhatsApp buttons; cached on disk after the first call)
+                                ?enriquecer=fundo (same, but in a background thread: returns the
+                                leads now with "enriquecimento": andamento|pronto|aguardando)
   DELETE /leads/buscas/{id}
 
 Socials lookup used by the page:
@@ -644,6 +646,43 @@ def save_cache(job_id, found):
             pass
 
 
+_enrich_jobs, _enrich_jobs_lock = set(), threading.Lock()
+
+
+def start_background_enrich(job_id, leads, found, finished):
+    """Visit the leads' sites (socials, WhatsApp) in a background thread and cache the result, so
+    the caller gets the leads now and the socials on a later read. -> "aguardando" (search still
+    running), "andamento" or "pronto"."""
+    if not finished:
+        return "aguardando"
+    sites = sorted({x["site"] for x in leads if x["site"]} - set((found or {}).keys()))
+    if not sites:
+        return "pronto"
+    with _enrich_jobs_lock:
+        if job_id in _enrich_jobs:
+            return "andamento"
+        _enrich_jobs.add(job_id)
+
+    def run():
+        try:
+            def one(site):
+                try:
+                    return enrich_site(site)
+                except Exception:
+                    return {}   # cached as "nothing found", so the site is not retried every read
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                results = dict(zip(sites, ex.map(one, sites)))
+            save_cache(job_id, {**(load_cache(job_id) or {}), **results})
+        except Exception as e:   # a failed enrichment only means no socials; the leads are fine
+            sys.stderr.write(f"api: enriquecimento de {job_id} falhou: {e}\n")
+        finally:
+            with _enrich_jobs_lock:
+                _enrich_jobs.discard(job_id)
+
+    threading.Thread(target=run, daemon=True).start()
+    return "andamento"
+
+
 def _job_rows(job_id):
     """Raw CSV rows the engine has written for a job so far ([] if nothing yet)."""
     try:
@@ -669,6 +708,9 @@ def get_leads(job_id, q):
         rows = _job_rows(job_id)
     leads = clean_rows(rows, summary["termos"]) if rows else []
     found = load_cache(job_id)
+    enrich_state = None
+    if q.get("enriquecer") == "fundo" and leads:
+        enrich_state = start_background_enrich(job_id, leads, found, summary["status"] == "pronta")
     if q.get("enriquecer") == "1" and leads:
         sites = sorted({lead["site"] for lead in leads if lead["site"]} - set((found or {}).keys()))
         if sites:
@@ -688,7 +730,8 @@ def get_leads(job_id, q):
         leads = [x for x in leads if x["celular"]]
     if q.get("whatsapp") == "1":   # has a WhatsApp link that was not ruled out by the check
         leads = [x for x in leads if x["whatsapp"] and x["whatsapp_confirmado"] is not False]
-    return {**summary, "enriquecida": bool(found), "verificacao_whatsapp": bool(WA_CHECK_URL and WA_CHECK_TOKEN),
+    extra = {"enriquecimento": enrich_state} if enrich_state else {}
+    return {**summary, **extra, "enriquecida": bool(found), "verificacao_whatsapp": bool(WA_CHECK_URL and WA_CHECK_TOKEN),
             "verificacao": whatsapp_check_status(job_id),
             "total_bruto": total, "total": len(leads), "leads": leads}
 
