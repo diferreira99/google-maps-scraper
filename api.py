@@ -17,8 +17,9 @@ http(s) hosts: every hop (including redirects) must resolve to a public IP, and 
 links and emails are returned, never page content.
 
 Run: python3 api.py [--addr 127.0.0.1] [--port 8082]
-WhatsApp check (optional): ?verificar_whatsapp=1 on GET /leads/buscas/{id} asks the Prospecta
-WhatsApp server (/check-number) whether each lead's number has WhatsApp, one at a time.
+WhatsApp check (optional): ?verificar_whatsapp=1 on GET /leads/buscas/{id} starts asking the
+Prospecta WhatsApp server (/check-number) about each lead's number, one at a time, in the
+background; the response's "verificacao" field shows progress until "rodando" is false.
 
 Env: ENGINE_URL (default http://127.0.0.1:8081), CACHE_DIR (default /gmapsdata/leads-cache),
      WHATSAPP_CHECK_URL + WHATSAPP_CHECK_TOKEN (Prospecta server and its API_TOKEN),
@@ -380,23 +381,59 @@ def _wa_digits(lead):
     return m.group(1) if m else lead["telefone_e164"].lstrip("+")
 
 
-def verify_whatsapp(leads, run_checks):
-    """Fill whatsapp_confirmado from the cache, and when run_checks is set, ask the Prospecta
-    server about the numbers not checked yet (one at a time, with a pause between calls).
-    A landline that turns out to have WhatsApp (WhatsApp Business) gets its wa.me link."""
+# One check run at a time (it goes through the user's own WhatsApp number). It runs in a
+# background thread so callers (a phone browser, n8n) poll for progress instead of holding one
+# HTTP request open for minutes.
+_wa_run = {"busca": None, "feitos": 0, "total": 0, "rodando": False, "erro": None}
+
+
+def _wa_worker(job_id, todo):
+    cache = _wa_cache()
+    try:
+        for i, n in enumerate(todo):
+            if i:
+                time.sleep(WA_CHECK_DELAY)
+            cache[n] = check_whatsapp(n)
+            _wa_cache_save(cache)   # small file; saving each answer lets polls show it right away
+            with _wa_lock:
+                _wa_run["feitos"] = i + 1
+    except EngineError as e:
+        with _wa_lock:
+            _wa_run["erro"] = str(e)
+    except Exception as e:   # keep the error visible to the page instead of dying silently
+        with _wa_lock:
+            _wa_run["erro"] = f"erro interno: {e}"
+    finally:
+        _wa_cache_save(cache)
+        with _wa_lock:
+            _wa_run["rodando"] = False
+
+
+def start_whatsapp_check(job_id, leads):
+    """Start checking this search's unchecked numbers in the background, unless a run is going."""
+    if not (WA_CHECK_URL and WA_CHECK_TOKEN):
+        raise EngineError(501, "verificação de WhatsApp não configurada (WHATSAPP_CHECK_URL e WHATSAPP_CHECK_TOKEN)")
+    cache = _wa_cache()
+    todo = list(dict.fromkeys(n for n in map(_wa_digits, leads) if n and n not in cache))
     with _wa_lock:
-        cache = _wa_cache()
-        if run_checks:
-            if not (WA_CHECK_URL and WA_CHECK_TOKEN):
-                raise EngineError(501, "verificação de WhatsApp não configurada (WHATSAPP_CHECK_URL e WHATSAPP_CHECK_TOKEN)")
-            todo = list(dict.fromkeys(n for n in map(_wa_digits, leads) if n and n not in cache))
-            try:
-                for i, n in enumerate(todo):
-                    if i:
-                        time.sleep(WA_CHECK_DELAY)
-                    cache[n] = check_whatsapp(n)
-            finally:
-                _wa_cache_save(cache)
+        if _wa_run["rodando"]:
+            if _wa_run["busca"] != job_id:
+                raise EngineError(409, "já existe uma confirmação de WhatsApp em andamento em outra busca; espere terminar")
+            return
+        _wa_run.update(busca=job_id, feitos=0, total=len(todo), rodando=bool(todo), erro=None)
+    if todo:
+        threading.Thread(target=_wa_worker, args=(job_id, todo), daemon=True).start()
+
+
+def whatsapp_check_status(job_id):
+    with _wa_lock:
+        return dict(_wa_run) if _wa_run["busca"] == job_id else None
+
+
+def apply_whatsapp_cache(leads):
+    """Fill whatsapp_confirmado from what was checked so far. A landline that turns out to have
+    WhatsApp (WhatsApp Business) gets its wa.me link."""
+    cache = _wa_cache()
     for lead in leads:
         n = _wa_digits(lead)
         if n in cache:
@@ -486,7 +523,9 @@ def get_leads(job_id, q):
                 save_cache(job_id, found)
     if found:
         apply_enrichment(leads, found)
-    verify_whatsapp(leads, q.get("verificar_whatsapp") == "1")
+    if q.get("verificar_whatsapp") == "1" and leads:
+        start_whatsapp_check(job_id, leads)
+    apply_whatsapp_cache(leads)
     total = len(leads)
     if q.get("relevantes", "1") != "0":
         leads = [x for x in leads if x["relevante"]]
@@ -497,6 +536,7 @@ def get_leads(job_id, q):
     if q.get("email") == "1":
         leads = [x for x in leads if x["email"]]
     return {**summary, "enriquecida": bool(found), "verificacao_whatsapp": bool(WA_CHECK_URL and WA_CHECK_TOKEN),
+            "verificacao": whatsapp_check_status(job_id),
             "total_bruto": total, "total": len(leads), "leads": leads}
 
 
@@ -539,7 +579,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass   # the client gave up waiting (e.g. a phone that locked its screen)
 
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -580,6 +623,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"erro": "rota não encontrada"})
         except EngineError as e:
             self._json(e.code if 400 <= e.code < 600 else 502, {"erro": str(e)})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         except Exception as e:   # never leave the client hanging on an unexpected error
             self._json(500, {"erro": f"erro interno: {e}"})
 

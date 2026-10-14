@@ -495,25 +495,46 @@ function loadLeads(data) {
   }));
   current.enriched = false;
   applyEnrichment(loadEnrichment(current.id));
+  if (data.verificacao && data.verificacao.rodando && !verifyTimer) {
+    const job = current; verifyTimer = setTimeout(() => { verifyTimer = null; pollVerify(job, false); }, 3000);
+  }
 }
 
 // Asks the Prospecta WhatsApp server, through /leads, whether each number has WhatsApp.
-$("verify-wa").onclick = async () => {
-  if (!current) return;
-  const job = current, btn = $("verify-wa"), msg = $("enrich-msg");
-  btn.disabled = true; msg.hidden = false;
-  msg.textContent = "Confirmando cada número no WhatsApp, um por vez. Leva uns 2 segundos por empresa; não feche a página.";
+// The server checks in the background; the page polls for progress, so closing or locking
+// the phone does not lose anything and reopening the results picks the progress back up.
+let verifyTimer = null;
+function showVerify(v) {
+  const msg = $("enrich-msg"), btn = $("verify-wa");
+  if (!v) return;
+  msg.hidden = false;
+  if (v.rodando) {
+    btn.disabled = true;
+    msg.textContent = "Confirmando no WhatsApp: " + v.feitos + " de " + v.total + " números. Você pode fechar a página; a confirmação continua no servidor.";
+  } else {
+    btn.disabled = false;
+    const ok = current.rows.filter(x => x.wa_confirmed === true).length, checked = current.rows.filter(x => x.wa_confirmed === true || x.wa_confirmed === false).length;
+    msg.textContent = v.erro
+      ? "A confirmação parou: " + v.erro + (v.feitos ? " (" + v.feitos + " números já confirmados ficam salvos)" : "")
+      : "Pronto: " + ok + " de " + checked + " números têm WhatsApp. Os que não têm ficam marcados como \"sem WhatsApp\".";
+  }
+}
+async function pollVerify(job, first) {
+  clearTimeout(verifyTimer); verifyTimer = null;
   try {
-    const r = await api("/leads/buscas/" + encodeURIComponent(job.id) + "?relevantes=0&verificar_whatsapp=1");
+    const r = await api("/leads/buscas/" + encodeURIComponent(job.id) + "?relevantes=0" + (first ? "&verificar_whatsapp=1" : ""));
     const data = await r.json();
     if (current !== job) return;
-    loadLeads(data); renderResults();
-    const ok = current.rows.filter(x => x.wa_confirmed === true).length, checked = current.rows.filter(x => x.wa_confirmed !== null && x.wa_confirmed !== undefined).length;
-    msg.textContent = "Pronto: " + ok + " de " + checked + " números têm WhatsApp. Os que não têm ficam marcados como \"sem WhatsApp\" e saem do link.";
+    loadLeads(data); renderResults(); showVerify(data.verificacao);
+    if (data.verificacao && data.verificacao.rodando) verifyTimer = setTimeout(() => pollVerify(job, false), 3000);
+    else if (first && !data.verificacao) showVerify({ rodando: false, feitos: 0, total: 0 });
   } catch (e) {
-    msg.textContent = "Não consegui confirmar: " + e.message;
-  } finally { btn.disabled = false; }
-};
+    if (current !== job) return;
+    $("enrich-msg").hidden = false; $("verify-wa").disabled = false;
+    $("enrich-msg").textContent = "Não consegui confirmar: " + e.message;
+  }
+}
+$("verify-wa").onclick = () => { if (current) { $("verify-wa").disabled = true; pollVerify(current, true); } };
 
 function filtered() {
   const q = $("filter").value.trim().toLowerCase();
@@ -610,7 +631,9 @@ $("enrich").onclick = async () => {
     if (current !== job) return;   // o usuário abriu outra busca
     msg.textContent = "Visitando os sites das empresas: " + done + " de " + sites.length + "…";
     try {
-      const r = await fetch("/enrich", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sites: sites.slice(i, i + 10) }) });
+      const send = () => fetch("/enrich", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sites: sites.slice(i, i + 10) }) });
+      let r; try { r = await send(); } catch { r = null; }
+      if (!r || !r.ok) r = await send();   // one retry: phones drop requests when the screen locks
       if (!r.ok) throw new Error("HTTP " + r.status);
       Object.assign(map, (await r.json()).results || {});
     } catch { failed += Math.min(10, sites.length - i); }
