@@ -160,6 +160,10 @@ def clean_site(raw):
 
 _STOP = {"para", "com", "sem", "dos", "das", "nos", "nas", "por", "uma", "loja", "lojas",
          "empresa", "empresas", "servico", "servicos"}
+# Words too generic to say what a business does ("Clínica odontológica" is about "odontológica").
+_GENERIC = _STOP | {"clinica", "clinicas", "centro", "escritorio", "consultorio", "assessoria",
+                    "agencia", "estudio", "studio", "instituto", "casa", "grupo", "rede", "loja",
+                    "comercio", "especialista", "profissional", "certificado", "certificada"}
 
 
 def _fold(s):
@@ -171,17 +175,39 @@ def term_stems(keywords):
     stems = set()
     for k in keywords or []:
         what = re.split(r"\s+(?:em|in|no|na|perto de)\s+", _fold(k), maxsplit=1)[0]
-        for w in re.findall(r"[a-z]{3,}", what):
-            if w not in _STOP:
-                stems.add(w if len(w) < 5 else w[:max(5, int(len(w) * 0.6))])
+        stems |= _word_stems(what, _STOP)
+    return stems
+
+
+def _word_stems(text, skip):
+    return {w if len(w) < 5 else w[:max(4, int(len(w) * 0.5))]
+            for w in re.findall(r"[a-z]{3,}", _fold(text)) if w not in skip}
+
+
+def relevance_stems(rows, keywords):
+    """Search-term stems plus the stems of categories Google returned often for this search.
+    Google ranks by relevance, so a category that shows up in several results is on topic
+    ("Clínica odontológica" for "dentista") even when it shares no word with the query."""
+    stems = term_stems(keywords)
+    counts = {}
+    for r in rows:
+        c = (r.get("category") or "").strip()
+        if c:
+            counts[c] = counts.get(c, 0) + 1
+    floor = max(3, len(rows) // 20)
+    for c, n in counts.items():
+        if n >= floor:
+            stems |= _word_stems(c, _GENERIC)
     return stems
 
 
 def is_relevant(row, stems):
+    """A stem matches the start of a word ('dent' -> 'dentários', not 'multicontas' for 'cont');
+    stems of 6+ letters also match inside a word ('odonto' -> 'ortodontista' needs 'odont...')."""
     if not stems:
         return True
-    text = _fold(row.get("title", "") + " " + row.get("category", ""))
-    return any(s in text for s in stems)
+    words = re.findall(r"[a-z]+", _fold(row.get("title", "") + " " + row.get("category", "")))
+    return any(w.startswith(s) or (len(s) >= 6 and s in w) for s in stems for w in words)
 
 
 def clean_address(address, name):
@@ -193,7 +219,8 @@ def clean_address(address, name):
 
 
 def clean_rows(rows, keywords):
-    stems, seen, out = term_stems(keywords), set(), []
+    rows = list(rows)
+    stems, seen, out = relevance_stems(rows, keywords), set(), []
     for r in rows:
         key = r.get("place_id") or r.get("cid") or (r.get("title", "") + "|" + r.get("address", ""))
         if key in seen:
