@@ -1,7 +1,7 @@
 # Google Maps Scraper
 
-Extrai listas de empresas do Google Maps (nome, telefone, WhatsApp, avaliação, site, redes sociais e
-endereço) para prospecção. Adaptado do
+Extrai listas de empresas do Google Maps (nome, categoria, telefone, WhatsApp, avaliação, site, redes
+sociais e endereço) para prospecção. Adaptado do
 [google-maps-scraper-kit](https://github.com/Mahanaicoach/google-maps-scraper-kit) (MIT, ver `LICENSE`),
 que usa o motor open-source [gosom/google-maps-scraper](https://github.com/gosom/google-maps-scraper).
 
@@ -11,7 +11,7 @@ Este guia reúne o que a skill do Claude Code do kit ensinava, para usar sem a s
 
 O `Dockerfile` sobe o motor e uma página em português (`web/index.html`) no mesmo endereço. Nela você
 digita o tipo de negócio e a cidade, acompanha as buscas e baixa a planilha já limpa (separada por `;`,
-abre direto no Excel) com Empresa, Telefone, WhatsApp, Avaliação, Site, Redes sociais e Endereço. As
+abre direto no Excel) com Empresa, Categoria, Telefone, WhatsApp, Avaliação, Site, Redes sociais e Endereço. As
 buscas não coletam e-mail, o que as deixa bem mais rápidas (3 a 6 minutos). O botão **Buscar redes
 sociais** visita a página inicial do site de cada empresa (pelo `api.py`, no servidor) e acrescenta
 Instagram, Facebook, LinkedIn e o botão de WhatsApp do site. Só funciona para empresas com site que divulgam essas redes
