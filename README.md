@@ -55,7 +55,8 @@ Cada lead:
 **Outras rotas:** `GET /leads/buscas` lista as buscas e `DELETE /leads/buscas/<id>` apaga uma.
 
 **O que a limpeza faz:**
-- tira duplicadas;
+- tira duplicadas e junta dois cadastros da mesma empresa (mesmo telefone no mesmo endereço) num só
+  lead, guardando o outro nome em `outros_nomes`;
 - decodifica e valida e-mails, removendo exemplos (`contact@example.com`, `first.last@email.com`) e
   deixando e-mails de vagas por último;
 - normaliza o telefone e marca se é celular; o WhatsApp só é preenchido para celular;

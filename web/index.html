@@ -292,7 +292,9 @@ async function geocode(place) {
 function toCSV(rows, cols) {
   const esc = (v) => /[";\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   const lines = [cols.map(c => HEAD_PT[c] || c).join(";")];
-  for (const r of rows) lines.push(cols.map(c => esc(String(r[c] ?? ""))).join(";"));
+  // Excel in Portuguese reads "4.8" as a date; ratings go out with a decimal comma.
+  const fmt = (c, v) => c === "review_rating" ? String(v ?? "").replace(".", ",") : String(v ?? "");
+  for (const r of rows) lines.push(cols.map(c => esc(fmt(c, r[c]))).join(";"));
   return "﻿" + lines.join("\r\n");
 }
 

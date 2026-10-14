@@ -258,7 +258,39 @@ def clean_rows(rows, keywords):
             "place_id": r.get("place_id", ""),
             "relevante": is_relevant(r, stems),
         })
-    return out
+    return merge_same_business(out)
+
+
+def _street(address):
+    """'R. Gladiolo, 85 - Monte Castelo, ...' -> 'r gladiolo 85' (street and number only)."""
+    return " ".join(re.findall(r"[a-z0-9]+", _fold(address.split(" - ")[0])))
+
+
+def merge_same_business(leads):
+    """Google often has two listings for one business (the firm and the accountant's own name).
+    Same phone at the same street address is the same contact: keep the listing with more reviews
+    and fill its blanks from the other, so a campaign does not message the same person twice."""
+    kept, by_key = [], {}
+    for lead in leads:
+        key = (lead["telefone_e164"], _street(lead["endereco"])) if lead["telefone_e164"] and lead["endereco"] else None
+        other = by_key.get(key) if key else None
+        if other is None:
+            if key:
+                by_key[key] = lead
+            kept.append(lead)
+            continue
+        main, extra = (other, lead) if other["avaliacoes"] >= lead["avaliacoes"] else (lead, other)
+        for k, v in extra.items():
+            if k != "emails" and not main.get(k) and v:
+                main[k] = v
+        main["emails"] = main["emails"] + [e for e in extra["emails"] if e not in main["emails"]]
+        main["email"] = main["emails"][0] if main["emails"] else ""
+        main["relevante"] = main["relevante"] or extra["relevante"]
+        main.setdefault("outros_nomes", []).append(extra["nome"])
+        if main is lead:
+            kept[kept.index(other)] = lead
+        by_key[key] = main
+    return kept
 
 
 def apply_enrichment(leads, found):
