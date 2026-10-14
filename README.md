@@ -18,9 +18,19 @@ Instagram, Facebook, LinkedIn e o botão de WhatsApp do site. Só funciona para 
 (em geral de 40 a 70% delas). O Caddy serve a página em `/` e repassa
 `/api/*` para o motor, e `/leads` e `/enrich` para o `api.py`, que só acessa endereços públicos. A interface original do motor deixa de ficar acessível.
 
+## Acesso e segurança
+
+- **Página do scraper e motor (`/api/*`):** pedem usuário e senha (`ADMIN_USER` e `ADMIN_PASS` nas
+  variáveis do serviço no Railway).
+- **API de leads (`/leads`, `/enrich`):** aceita o login de um usuário do Prospecta+ (token do Supabase em
+  `Authorization: Bearer <token>`), um token de servidor (lista em `API_TOKENS`, para o n8n) ou a senha
+  de admin. Precisa de `SUPABASE_URL` e `SUPABASE_ANON_KEY`.
+- **`AUTH_MODO`:** `transicao` aceita chamadas sem login (para versões antigas do app), mas recusa login
+  errado; `obrigatorio` exige login; `desligado` não confere nada.
+
 ## API de leads limpos (para o Prospecta, n8n etc.)
 
-Endereço base: `https://google-maps-scraper-production-3f90.up.railway.app`. Sem senha, como a página.
+Endereço base: `https://google-maps-scraper-production-3f90.up.railway.app`. Exige login (veja acima).
 
 **Criar busca:** `POST /leads/buscas`
 

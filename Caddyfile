@@ -4,17 +4,26 @@
 
 :{$PORT:8080} {
 	encode gzip
-	handle /api/* {
-		reverse_proxy 127.0.0.1:8081
-	}
+
+	# API de leads: o api.py confere o login (Prospecta+, token de servidor ou senha de admin).
 	handle /leads* {
 		reverse_proxy 127.0.0.1:8082
 	}
 	handle /enrich* {
 		reverse_proxy 127.0.0.1:8082
 	}
+
+	# Página do scraper e acesso direto ao motor: só com a senha de admin.
 	handle {
-		root * /srv
-		file_server
+		basic_auth {
+			{$ADMIN_USER} {$ADMIN_PASS_HASH}
+		}
+		handle /api/* {
+			reverse_proxy 127.0.0.1:8081
+		}
+		handle {
+			root * /srv
+			file_server
+		}
 	}
 }

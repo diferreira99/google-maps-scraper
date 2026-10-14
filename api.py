@@ -25,7 +25,7 @@ Env: ENGINE_URL (default http://127.0.0.1:8081), CACHE_DIR (default /gmapsdata/l
      WHATSAPP_CHECK_URL + WHATSAPP_CHECK_TOKEN (Prospecta server and its API_TOKEN),
      WHATSAPP_CHECK_DELAY_S (pause between checks, default 2)
 """
-import argparse, csv, io, ipaddress, json, os, re, socket, sys, threading, time, unicodedata, uuid
+import argparse, base64, csv, hashlib, hmac, io, ipaddress, json, os, re, socket, sys, threading, time, unicodedata, uuid
 from datetime import datetime, timezone
 import urllib.error, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -853,11 +853,81 @@ def redo_search(sid):
     return new
 
 
+# ── Access control ───────────────────────────────────────────────────────────
+# Who may call /leads and /enrich: a Prospecta+ user (Supabase login token, sent as
+# "Authorization: Bearer <token>"), a server with one of API_TOKENS (n8n), or the admin with the
+# scraper page's Basic login. AUTH_MODO: "transicao" lets calls without credentials through (for app
+# versions that do not send the token yet) but still rejects wrong credentials; "obrigatorio"
+# requires them; "desligado" turns the check off.
+AUTH_MODO = os.environ.get("AUTH_MODO", "transicao").strip().lower()
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+API_TOKENS = {t.strip() for t in os.environ.get("API_TOKENS", "").split(",") if t.strip()}
+ADMIN_USER = os.environ.get("ADMIN_USER", "")
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "")
+_login_cache = {}   # sha256(token) -> (expires_at, user dict); avoids asking Supabase on every poll
+_login_lock = threading.Lock()
+
+
+class NotAuthorized(Exception):
+    pass
+
+
+def _supabase_user(token):
+    key = hashlib.sha256(token.encode()).hexdigest()
+    now = time.time()
+    with _login_lock:
+        hit = _login_cache.get(key)
+        if hit and hit[0] > now:
+            return hit[1]
+    if not (SUPABASE_URL and SUPABASE_ANON_KEY):
+        raise NotAuthorized("login do Prospecta+ não configurado neste servidor")
+    req = urllib.request.Request(SUPABASE_URL + "/auth/v1/user",
+                                 headers={"apikey": SUPABASE_ANON_KEY, "Authorization": "Bearer " + token})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            user = json.loads(r.read())
+    except (urllib.error.URLError, ValueError):
+        raise NotAuthorized("sessão expirada, faça login de novo no Prospecta+")
+    if not user.get("id"):
+        raise NotAuthorized("sessão inválida")
+    with _login_lock:
+        if len(_login_cache) > 2000:
+            _login_cache.clear()
+        _login_cache[key] = (now + 300, user)
+    return user
+
+
+def authorize(headers, query):
+    """-> description of the caller, or raises NotAuthorized."""
+    if AUTH_MODO == "desligado":
+        return "aberto"
+    auth = headers.get("Authorization") or ""
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else (query.get("access_token") or "").strip()
+    if auth.lower().startswith("basic "):
+        try:
+            user, _, pw = base64.b64decode(auth[6:].strip()).decode().partition(":")
+        except (ValueError, UnicodeDecodeError):
+            raise NotAuthorized("login inválido")
+        if ADMIN_PASS and hmac.compare_digest(user, ADMIN_USER) and hmac.compare_digest(pw, ADMIN_PASS):
+            return "admin"
+        raise NotAuthorized("usuário ou senha incorretos")
+    if token:
+        if any(hmac.compare_digest(token, t) for t in API_TOKENS):
+            return "servidor"
+        return "usuario:" + (_supabase_user(token).get("email") or "?")
+    if AUTH_MODO == "obrigatorio":
+        raise NotAuthorized("faça login no Prospecta+")
+    return "sem-login"
+
+
 # ── HTTP ─────────────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
-    def _json(self, code, obj):
+    def _json(self, code, obj, extra_headers=None):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -886,6 +956,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if method == "GET" and path == "/enrich/health":
                 return self._json(200, {"ok": True})
+            try:
+                caller = authorize(self.headers, q)
+            except NotAuthorized as e:
+                return self._json(401, {"erro": "não autorizado: " + str(e)},
+                                  extra_headers={"WWW-Authenticate": 'Basic realm="restricted"'})
+            if caller == "sem-login":
+                sys.stderr.write(f"api: chamada sem login (modo transicao): {method} {path}\n")
             if method == "POST" and path == "/enrich":
                 return self._enrich()
             if path == "/leads/buscas" and method == "GET":
@@ -921,7 +998,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
     def _enrich(self):
