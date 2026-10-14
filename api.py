@@ -40,6 +40,8 @@ MAX_SITES = 20
 MAX_BODY = 64_000
 ENGINE = os.environ.get("ENGINE_URL", "http://127.0.0.1:8081").rstrip("/")
 CACHE_DIR = os.environ.get("CACHE_DIR", "/gmapsdata/leads-cache")
+DATA_DIR = os.environ.get("DATA_DIR", "/gmapsdata")   # where the engine writes <job id>.csv
+BOOT = time.time()
 WA_CHECK_URL = os.environ.get("WHATSAPP_CHECK_URL", "").rstrip("/")
 WA_CHECK_TOKEN = os.environ.get("WHATSAPP_CHECK_TOKEN", "")
 WA_CHECK_DELAY = float(os.environ.get("WHATSAPP_CHECK_DELAY_S", "2"))
@@ -535,10 +537,49 @@ def _parse_date(value):
     return datetime.fromisoformat(f"{m.group(1)}.{frac}{'+00:00' if tz == 'Z' else tz}")
 
 
+def _csv_layout_ok():
+    """True once we have seen a finished job's CSV at DATA_DIR/<id>.csv, so the file check below can
+    be trusted (if the engine ever stores results elsewhere, only the time-limit rule is used)."""
+    if not _csv_layout_ok.ok:
+        try:
+            _csv_layout_ok.ok = any(n.endswith(".csv") for n in os.listdir(DATA_DIR))
+        except OSError:
+            pass
+    return _csv_layout_ok.ok
+
+
+_csv_layout_ok.ok = False
+
+
+def _csv_mtime(jid):
+    try:
+        return os.path.getmtime(os.path.join(DATA_DIR, f"{jid}.csv"))
+    except OSError:
+        return None
+
+
+def cut_by_restart(j, jobs=None):
+    """A job left 'working' by the previous server process (the engine never resumes those).
+    Certain when its CSV was last written before this boot. With no CSV at all, only when `jobs`
+    shows another job writing rows after the boot: the engine runs one job at a time."""
+    if j.get("Status") != "working" or not _csv_layout_ok():
+        return False
+    created = _parse_date(j.get("Date"))
+    if not created or created.timestamp() >= BOOT:
+        return False
+    mtime = _csv_mtime(j.get("ID"))
+    if mtime is not None:
+        return mtime < BOOT
+    return any(o.get("Status") == "working" and o.get("ID") != j.get("ID")
+               and (_csv_mtime(o.get("ID")) or 0) >= BOOT for o in (jobs or {}).values())
+
+
 def job_status(j):
-    """Engine status in Portuguese. A job still 'working' well past its time limit was cut off by a
-    server restart (the engine never picks it up again), so it is reported as 'interrompida'."""
+    """Engine status in Portuguese. A job still 'working' well past its time limit, or left working
+    by a server restart (the engine never picks it up again), is reported as 'interrompida'."""
     st = j.get("Status")
+    if cut_by_restart(j):
+        return "interrompida"
     if st == "working":
         started = _parse_date(j.get("Date"))
         limit_s = ((j.get("Data") or {}).get("max_time") or 0) / 1e9 or 1200
@@ -889,17 +930,90 @@ def redo_search(sid):
     else:
         _, raw = engine("GET", "/api/v1/jobs/" + urllib.parse.quote(sid))
         j = json.loads(raw)
-        d = j.get("Data") or {}
-        job = {"name": j.get("Name"), "keywords": d.get("keywords"), "lang": d.get("lang") or "pt",
-               "zoom": d.get("zoom") or 15, "lat": d.get("lat"), "lon": d.get("lon"), "fast_mode": False,
-               "radius": d.get("radius") or 10000, "depth": d.get("depth") or 10, "email": False,
-               "max_time": round((d.get("max_time") or 1200e9) / 1e9)}
-        if d.get("proxies"):
-            job["proxies"] = d["proxies"]
-        _, raw = engine("POST", "/api/v1/jobs", job)
-        new = {"id": json.loads(raw).get("id"), "status": "na_fila", "nome": job["name"]}
+        new = {"id": _requeue_job(j), "status": "na_fila", "nome": j.get("Name")}
     delete_search(sid)
     return new
+
+
+def _requeue_job(j):
+    """Queue a copy of an engine job (same terms, place and limits) -> new job id."""
+    d = j.get("Data") or {}
+    job = {"name": j.get("Name"), "keywords": d.get("keywords"), "lang": d.get("lang") or "pt",
+           "zoom": d.get("zoom") or 15, "lat": d.get("lat"), "lon": d.get("lon"), "fast_mode": False,
+           "radius": d.get("radius") or 10000, "depth": d.get("depth") or 10, "email": False,
+           "max_time": round((d.get("max_time") or 1200e9) / 1e9)}
+    if d.get("proxies"):
+        job["proxies"] = d["proxies"]
+    _, raw = engine("POST", "/api/v1/jobs", job)
+    return json.loads(raw).get("id")
+
+
+# ── Automatic recovery after a restart ──────────────────────────────────────
+# A deploy restarts the engine and leaves the running search stuck. Shortly after boot the API
+# re-queues such searches by itself and remembers old id -> new id, so an app still following the
+# old id keeps getting the search (GET /leads/buscas/<old id> answers with the new one).
+def _aliases_path():
+    return os.path.join(CACHE_DIR, "reiniciadas.json")
+
+
+def load_aliases():
+    try:
+        with open(_aliases_path()) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def resolve_id(sid):
+    aliases, seen = load_aliases(), set()
+    while sid in aliases and sid not in seen:
+        seen.add(sid)
+        sid = aliases[sid]
+    return sid
+
+
+def _add_alias(old, new):
+    with _cache_lock:
+        a = load_aliases()
+        a[old] = new
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(_aliases_path(), "w") as f:
+            json.dump(a, f)
+
+
+def recover_interrupted():
+    """Re-queue every search the last restart cut off. Grid searches only re-queue the cut region."""
+    jobs = _engine_jobs()
+    cut = [jid for jid, j in jobs.items() if cut_by_restart(j, jobs)]
+    if not cut:
+        return
+    members = {jid: g for g in list_groups() for jid in g["jobs"]}
+    for jid in cut:
+        try:
+            g = members.get(jid)
+            if g:
+                new = _requeue_job(jobs[jid])
+                g["jobs"] = [new if x == jid else x for x in g["jobs"]]
+                save_group(g)
+                engine("DELETE", "/api/v1/jobs/" + urllib.parse.quote(jid))
+            else:
+                new = redo_search(jid)["id"]
+                _add_alias(jid, new)
+            sys.stderr.write(f"api: busca {jid} interrompida pelo reinício; refeita como {new}\n")
+        except Exception as e:
+            sys.stderr.write(f"api: não consegui refazer {jid}: {e}\n")
+
+
+def _recovery_loop():
+    # Checks a few times in the first 15 minutes after boot.
+    for i, wait in enumerate((90, 120, 180, 180, 180, 180)):
+        time.sleep(wait)
+        if i == 0:
+            sys.stderr.write(f"api: recuperação após reinício {'ativa' if _csv_layout_ok() else 'desligada (CSVs não encontrados em ' + DATA_DIR + ')'}\n")
+        try:
+            recover_interrupted()
+        except Exception as e:
+            sys.stderr.write(f"api: recuperação após reinício falhou: {e}\n")
 
 
 # ── Access control ───────────────────────────────────────────────────────────
@@ -1018,14 +1132,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"buscas": list_searches()})
             if path == "/leads/buscas" and method == "POST":
                 return self._json(201, create_search(self._body()))
-            if m and method == "GET":
-                return self._json(200, get_leads(m.group(1), q))
+            if m and method == "GET":   # an id cut by a restart answers with the search that replaced it
+                return self._json(200, get_leads(resolve_id(m.group(1)), q))
             if m and method == "DELETE":
-                delete_search(m.group(1))
+                delete_search(resolve_id(m.group(1)))
                 return self._json(200, {"apagada": m.group(1)})
             redo = re.fullmatch(r"/leads/buscas/([A-Za-z0-9-]{1,64})/refazer", path)
             if redo and method == "POST":
-                return self._json(201, redo_search(redo.group(1)))
+                return self._json(201, redo_search(resolve_id(redo.group(1))))
             self._json(404, {"erro": "rota não encontrada"})
         except EngineError as e:
             self._json(e.code if 400 <= e.code < 600 else 502, {"erro": str(e)})
@@ -1072,6 +1186,7 @@ def main():
     ap.add_argument("--port", type=int, default=8082)
     a = ap.parse_args()
     print(f"api: listening on {a.addr}:{a.port}, engine {ENGINE}", file=sys.stderr)
+    threading.Thread(target=_recovery_loop, daemon=True).start()
     ThreadingHTTPServer((a.addr, a.port), Handler).serve_forever()
 
 

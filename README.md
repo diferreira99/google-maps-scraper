@@ -97,7 +97,9 @@ WhatsApp e não foi descartado na confirmação. Precisa das variáveis `WHATSAP
 
 **Outras rotas:** `GET /leads/buscas` lista as buscas, `DELETE /leads/buscas/<id>` apaga uma (numa
 grade, apaga todas as regiões) e `POST /leads/buscas/<id>/refazer` coloca a mesma busca na fila de novo
-e apaga a antiga. O `status` `interrompida` marca uma busca cortada por um reinício do servidor.
+e apaga a antiga. O `status` `interrompida` marca uma busca cortada por um reinício do servidor. Nos primeiros 15 minutos depois
+de um reinício a API refaz sozinha essas buscas (numa busca em grade, só a região cortada) e o id antigo passa a
+responder com a busca nova (`GET /leads/buscas/<id antigo>` devolve a nova, com o `id` novo).
 
 **O que a limpeza faz:**
 - tira duplicadas e junta dois cadastros da mesma empresa (mesmo telefone no mesmo endereço) num só
