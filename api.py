@@ -673,6 +673,8 @@ def start_background_enrich(job_id, leads, found, finished):
             with ThreadPoolExecutor(max_workers=8) as ex:
                 results = dict(zip(sites, ex.map(one, sites)))
             save_cache(job_id, {**(load_cache(job_id) or {}), **results})
+            got = sum(1 for x in results.values() if any(x.get(k) for k in ("instagram", "facebook", "linkedin")))
+            sys.stderr.write(f"api: enriquecimento de {job_id}: {len(sites)} sites, {got} com rede social\n")
         except Exception as e:   # a failed enrichment only means no socials; the leads are fine
             sys.stderr.write(f"api: enriquecimento de {job_id} falhou: {e}\n")
         finally:
@@ -720,6 +722,10 @@ def get_leads(job_id, q):
                 save_cache(job_id, found)
     if found:
         apply_enrichment(leads, found)
+    if enrich_state:
+        com_rede = sum(1 for x in leads if x["instagram"] or x["facebook"] or x["linkedin"])
+        sys.stderr.write(f"api: redes de {job_id}: {enrich_state}, {com_rede} de {len(leads)} leads com rede, "
+                         f"{len(found or {})} sites no cache\n")
     if q.get("verificar_whatsapp") == "1" and leads:
         start_whatsapp_check(job_id, leads)
     apply_whatsapp_cache(leads)
