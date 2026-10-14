@@ -7,6 +7,9 @@
 	handle /api/* {
 		reverse_proxy 127.0.0.1:8081
 	}
+	handle /leads* {
+		reverse_proxy 127.0.0.1:8082
+	}
 	handle /enrich* {
 		reverse_proxy 127.0.0.1:8082
 	}

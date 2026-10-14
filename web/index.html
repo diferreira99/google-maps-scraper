@@ -172,8 +172,8 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
             <label for="maxtime">Tempo limite</label>
             <select id="maxtime">
               <option value="300">5 min</option>
-              <option value="600" selected>10 min</option>
-              <option value="1200">20 min</option>
+              <option value="600">10 min</option>
+              <option value="1200" selected>20 min</option>
               <option value="1800">30 min</option>
             </select>
           </div>
@@ -234,6 +234,7 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
       <input type="text" id="filter" placeholder="Filtrar por nome, categoria, bairro…" aria-label="Filtrar resultados">
       <label class="check"><input type="checkbox" id="only-email"> Só com e-mail</label>
       <label class="check"><input type="checkbox" id="only-phone"> Só com telefone</label>
+      <label class="check"><input type="checkbox" id="only-relevant" checked> Só do tema da busca</label>
     </div>
     <div class="table-wrap">
       <table>
@@ -272,7 +273,7 @@ async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
   if (!r.ok) {
     let msg = "HTTP " + r.status;
-    try { const j = await r.json(); if (j.message) msg = j.message; } catch {}
+    try { const j = await r.json(); if (j.message || j.erro) msg = j.message || j.erro; } catch {}
     throw new Error(msg);
   }
   return r;
@@ -288,40 +289,6 @@ async function geocode(place) {
 }
 
 // ---------- CSV ----------
-function parseCSV(text) {
-  const rows = []; let row = []; let field = ""; let q = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (q) {
-      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; }
-      else field += c;
-    } else if (c === '"') q = true;
-    else if (c === ",") { row.push(field); field = ""; }
-    else if (c === "\n" || c === "\r") {
-      if (c === "\r" && text[i + 1] === "\n") i++;
-      row.push(field); field = ""; rows.push(row); row = [];
-    } else field += c;
-  }
-  if (field !== "" || row.length) { row.push(field); rows.push(row); }
-  const head = rows.shift() || [];
-  return rows.filter(r => r.length > 1 || r[0]).map(r => Object.fromEntries(head.map((h, i) => [h.trim(), (r[i] ?? "").trim()])));
-}
-
-function cleanEmails(v) {
-  if (!v) return "";
-  return v.replace(/[\[\]"]/g, "").split(/[,;\s]+/).filter(e => e.includes("@")).filter((e, i, a) => a.indexOf(e) === i).join(", ");
-}
-
-function waNumber(phone) {
-  let d = (phone || "").replace(/\D/g, "");
-  if (!d) return "";
-  if (d.startsWith("0")) d = d.replace(/^0+/, "");
-  if (d.length === 10 || d.length === 11) d = "55" + d;
-  // Só celulares brasileiros (9 dígitos depois do DDD) têm WhatsApp com certeza razoável.
-  if (!(d.startsWith("55") && d.length === 13 && d[4] === "9")) return "";
-  return d;
-}
-
 function toCSV(rows, cols) {
   const esc = (v) => /[";\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   const lines = [cols.map(c => HEAD_PT[c] || c).join(";")];
@@ -498,21 +465,17 @@ async function openResults(j) {
   $("dl-full").href = API + "/" + encodeURIComponent(j.ID) + "/download";
   $("dl-full").setAttribute("download", slug(j.Name) + "-completo.csv");
   try {
-    const r = await api(API + "/" + encodeURIComponent(j.ID) + "/download");
-    const raw = parseCSV(await r.text());
-    const seen = new Set();
-    current.rows = raw.filter(x => {
-      const k = x.place_id || x.cid || x.link || (x.title + "|" + x.address);
-      if (seen.has(k)) return false; seen.add(k); return true;
-    }).map(x => {
-      const o = {};
-      for (const c of LEAD) o[c] = x[c] || "";
-      o.emails = cleanEmails(o.emails);
-      const w = waNumber(o.phone);
-      o.whatsapp = w ? "https://wa.me/" + w : "";
-      for (const k of SOCIAL) o[k] = "";
-      return o;
-    });
+    // /leads does the cleaning (emails, phones, WhatsApp, sites, off-topic results) on the server,
+    // the same way integrations like Prospecta get it.
+    const r = await api("/leads/buscas/" + encodeURIComponent(j.ID) + "?relevantes=0");
+    const data = await r.json();
+    current.status = data.status;
+    current.rows = (data.leads || []).map(x => ({
+      title: x.nome, phone: x.telefone, emails: (x.emails || []).join(", "), website: x.site,
+      category: x.categoria, address: x.endereco, review_rating: x.nota == null ? "" : String(x.nota),
+      review_count: x.avaliacoes ? String(x.avaliacoes) : "", whatsapp: x.whatsapp,
+      instagram: x.instagram, facebook: x.facebook, linkedin: x.linkedin, relevante: x.relevante,
+    }));
     current.enriched = false;
     applyEnrichment(loadEnrichment(j.ID));
     renderResults();
@@ -529,6 +492,7 @@ function filtered() {
   return current.rows.filter(r =>
     (!$("only-email").checked || r.emails) &&
     (!$("only-phone").checked || r.phone) &&
+    (!$("only-relevant").checked || r.relevante !== false) &&
     (!q || (r.title + " " + r.category + " " + r.address).toLowerCase().includes(q)));
 }
 
@@ -536,7 +500,7 @@ function cell(text, cls) { const td = document.createElement("td"); if (cls) td.
 function link(href, text) { const a = document.createElement("a"); a.href = href; a.target = "_blank"; a.rel = "noopener"; a.textContent = text; return a; }
 
 function renderResults() {
-  const all = current.rows, rows = filtered();
+  const all = $("only-relevant").checked ? current.rows.filter(r => r.relevante !== false) : current.rows, rows = filtered();
   const withSocial = all.filter(r => SOCIAL.some(k => r[k])).length;
   const n = all.length, withEmail = all.filter(r => r.emails).length, withPhone = all.filter(r => r.phone).length, withWa = all.filter(r => r.whatsapp).length;
   const pct = (x) => n ? " (" + Math.round(100 * x / n) + "%)" : "";
@@ -548,7 +512,9 @@ function renderResults() {
 
   const tb = $("rows"); tb.textContent = "";
   if (!n) {
-    const tr = document.createElement("tr"); const td = cell("A busca terminou sem resultados. Tente aumentar o raio, a profundidade ou usar um termo mais amplo."); td.colSpan = 7; tr.append(td); tb.append(tr); return;
+    const tr = document.createElement("tr"); const td = cell(current.status === "pronta"
+      ? "A busca terminou sem resultados. Tente aumentar o raio, a profundidade ou usar um termo mais amplo."
+      : "Esta busca ainda não gravou nenhum resultado. Espere um pouco e clique em Ver parciais de novo."); td.colSpan = 7; tr.append(td); tb.append(tr); return;
   }
   for (const r of rows) {
     const tr = document.createElement("tr");
@@ -565,7 +531,7 @@ function renderResults() {
   }
 }
 
-for (const id of ["filter", "only-email", "only-phone"]) $(id).addEventListener("input", () => current && renderResults());
+for (const id of ["filter", "only-email", "only-phone", "only-relevant"]) $(id).addEventListener("input", () => current && renderResults());
 $("dl-clean").onclick = () => {
   if (!current) return;
   saveFile(slug(current.name) + ".csv", toCSV(filtered(), [...LEAD, "whatsapp", ...(current.enriched ? SOCIAL : [])]), "text/csv;charset=utf-8");
