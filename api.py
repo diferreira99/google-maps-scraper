@@ -250,6 +250,20 @@ def format_hours(raw):
     return " · ".join(f"{label(f, l, order.index(l) - order.index(f) + 1)} {v}" for f, l, v in groups)
 
 
+def hours_by_day(raw):
+    """{"segunda-feira": "08:00–17:30", ..., "domingo": "fechado"} in week order, for apps that check
+    whether the place is open right now."""
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for name, _ in _DAYS:
+        v = raw.get(name)
+        if v:
+            v = " / ".join(v) if isinstance(v, list) else str(v)
+            out[name] = "fechado" if v.lower() == "fechado" else "00:00–23:59" if "24 horas" in v.lower() else v
+    return out
+
+
 def negative_reviews(row):
     """How many 1- and 2-star reviews the place has."""
     per = _json_field(row, "reviews_per_rating")
@@ -321,6 +335,7 @@ def clean_rows(rows, keywords):
             "bairro": ((_json_field(r, "complete_address") or {}).get("borough") or "").strip(),
             "cep": ((_json_field(r, "complete_address") or {}).get("postal_code") or "").strip(),
             "horario": format_hours(_json_field(r, "open_hours")),
+            "horario_dias": hours_by_day(_json_field(r, "open_hours")),
             "nota": rating,
             "avaliacoes": reviews,
             "avaliacoes_negativas": negative_reviews(r),
