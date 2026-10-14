@@ -54,13 +54,19 @@ Cada lead:
   "telefone": "+55 12 99114-2186", "telefone_e164": "+5512991142186", "celular": true,
   "whatsapp": "https://wa.me/5512991142186", "whatsapp_origem": "celular", "whatsapp_confirmado": true,
   "site": "https://acaocontabilsjc.com.br/", "instagram": "", "facebook": "", "linkedin": "",
-  "endereco": "Av. Dr. Ademar de Barros, 56 - ...", "nota": 5.0, "avaliacoes": 37,
+  "endereco": "Av. Dr. Ademar de Barros, 566 - Sl 1409 - Jardim São Dimas, ...", "bairro": "Jardim São Dimas",
+  "cep": "12245-050", "horario": "seg a qui 08:00–17:30 · sex 08:00–17:00 · sáb e dom fechado",
+  "nota": 5.0, "avaliacoes": 37, "avaliacoes_negativas": 0,
+  "ultimas_avaliacoes": [{"nota": 5, "data": "2026-05-14", "quando": "4 meses atrás", "texto": "Atendimento impecável..."}],
   "google_maps": "https://www.google.com/maps/place/...", "place_id": "ChIJ...", "relevante": true
 }
 ```
 
+`avaliacoes_negativas` conta as notas 1 e 2. `ultimas_avaliacoes` traz até 5 das avaliações que o Google
+mostra, das mais recentes para as mais antigas, sem o nome de quem avaliou.
+
 **WhatsApp:** `whatsapp` vem preenchido para celulares, para links de WhatsApp que o Google tinha no
-lugar do site e, com `?enriquecer=1`, para o botão de WhatsApp encontrado no site da empresa
+lugar do site ou nos links de agendamento/pedido online e, com `?enriquecer=1`, para o botão de WhatsApp encontrado no site da empresa
 (`whatsapp_origem` diz de onde veio). Com `?verificar_whatsapp=1`, a confirmação começa em segundo plano: cada número é consultado no
 servidor `prospecta-whatsapp` (`/check-number`), um por vez, com 2 segundos entre consultas. A resposta
 volta na hora, e o campo `verificacao` (`{"feitos": 12, "total": 57, "rodando": true, "erro": null}`)

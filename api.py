@@ -217,6 +217,71 @@ def clean_address(address, name):
     return a.removesuffix(", Brasil").removesuffix(", Brazil")
 
 
+def _json_field(row, key):
+    """The engine writes nested data (hours, address parts, reviews) as JSON text; 'null' or junk -> None."""
+    try:
+        return json.loads(row.get(key) or "null")
+    except ValueError:
+        return None
+
+
+_DAYS = [("segunda-feira", "seg"), ("terça-feira", "ter"), ("quarta-feira", "qua"), ("quinta-feira", "qui"),
+         ("sexta-feira", "sex"), ("sábado", "sáb"), ("domingo", "dom")]
+
+
+def format_hours(raw):
+    """{"segunda-feira": ["08:00–17:30"], ...} -> 'seg a qui 08:00–17:30 · sex 08:00–17:00 · sáb e dom fechado'."""
+    if not isinstance(raw, dict):
+        return ""
+    def norm(v):
+        v = " / ".join(v) if isinstance(v, list) else str(v)
+        low = v.lower()
+        return "fechado" if low == "fechado" else "24 horas" if "24 horas" in low else v
+    days = [(abbr, norm(raw[name])) for name, abbr in _DAYS if raw.get(name)]
+    groups = []
+    for abbr, value in days:
+        if groups and groups[-1][2] == value:
+            groups[-1][1] = abbr
+        else:
+            groups.append([abbr, abbr, value])
+    def label(first, last, n):
+        return first if n == 1 else f"{first} e {last}" if n == 2 else f"{first} a {last}"
+    order = [a for _, a in _DAYS]
+    return " · ".join(f"{label(f, l, order.index(l) - order.index(f) + 1)} {v}" for f, l, v in groups)
+
+
+def negative_reviews(row):
+    """How many 1- and 2-star reviews the place has."""
+    per = _json_field(row, "reviews_per_rating")
+    if not isinstance(per, dict):
+        return 0
+    return sum(int(per.get(k) or 0) for k in ("1", "2"))
+
+
+def latest_reviews(row, n=5):
+    """The n most recent of the reviews Google showed: rating, date and text (no reviewer names)."""
+    items = _json_field(row, "user_reviews")
+    out = []
+    for x in items if isinstance(items, list) else []:
+        text = re.sub(r"\s+", " ", (x.get("text_original") or x.get("Description") or "")).strip()
+        try:
+            rating = int(float(x.get("rating_float") or x.get("Rating") or 0)) or None
+        except ValueError:
+            rating = None
+        out.append({"nota": rating, "data": (x.get("published_at") or "")[:10], "quando": x.get("When") or "", "texto": text})
+    return sorted(out, key=lambda r: r["data"], reverse=True)[:n]
+
+
+def booking_whatsapp(row):
+    """WhatsApp number from the place's online booking/order links, which are often wa.me links."""
+    links = _json_field(row, "order_online")
+    for x in links if isinstance(links, list) else []:
+        number = find_whatsapp(x.get("link", "") if isinstance(x, dict) else "")
+        if number:
+            return number
+    return ""
+
+
 def clean_rows(rows, keywords):
     rows = list(rows)
     stems, seen, out = relevance_stems(rows, keywords), set(), []
@@ -227,8 +292,10 @@ def clean_rows(rows, keywords):
         seen.add(key)
         site, extras = clean_site(r.get("website", ""))
         e164, mobile = br_phone(r.get("phone", ""))
-        wa = extras.get("whatsapp_numero") or (e164 if mobile else "")
-        origin = "link_google" if extras.get("whatsapp_numero") else ("celular" if wa else "")
+        booking = booking_whatsapp(r)
+        wa = extras.get("whatsapp_numero") or (e164 if mobile else "") or booking
+        origin = ("link_google" if extras.get("whatsapp_numero") else "celular" if mobile
+                  else "agendamento_google" if booking else "")
         try:
             rating = float(r.get("review_rating") or 0) or None
         except ValueError:
@@ -251,8 +318,13 @@ def clean_rows(rows, keywords):
             "facebook": extras.get("facebook", ""),
             "linkedin": extras.get("linkedin", ""),
             "endereco": clean_address(r.get("address"), r.get("title")),
+            "bairro": ((_json_field(r, "complete_address") or {}).get("borough") or "").strip(),
+            "cep": ((_json_field(r, "complete_address") or {}).get("postal_code") or "").strip(),
+            "horario": format_hours(_json_field(r, "open_hours")),
             "nota": rating,
             "avaliacoes": reviews,
+            "avaliacoes_negativas": negative_reviews(r),
+            "ultimas_avaliacoes": latest_reviews(r),
             "google_maps": r.get("link", ""),
             "place_id": r.get("place_id", ""),
             "relevante": is_relevant(r, stems),

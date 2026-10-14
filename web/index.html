@@ -252,8 +252,9 @@ footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
 
 <script>
 // Spreadsheet columns, in order. Socials stay empty until "Buscar redes sociais" runs.
-const LEAD = ["title", "category", "phone", "whatsapp", "review_rating", "review_count", "website", "instagram", "facebook", "linkedin", "address"];
-const HEAD_PT = { title: "Empresa", phone: "Telefone", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Avaliação", review_count: "Nº de avaliações", whatsapp: "WhatsApp", wa_ok: "WhatsApp confirmado", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
+const LEAD = ["title", "category", "phone", "whatsapp", "review_rating", "review_count", "negatives", "website", "instagram", "facebook", "linkedin",
+              "address", "borough", "cep", "hours", "reviews"];
+const HEAD_PT = { title: "Empresa", phone: "Telefone", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Avaliação", review_count: "Nº de avaliações", negatives: "Avaliações negativas (1 e 2 estrelas)", borough: "Bairro", cep: "CEP", hours: "Horário de funcionamento", reviews: "Últimas avaliações", whatsapp: "WhatsApp", wa_ok: "WhatsApp confirmado", instagram: "Instagram", facebook: "Facebook", linkedin: "LinkedIn" };
 const SOCIAL = ["instagram", "facebook", "linkedin"];
 // Searches go through /leads/buscas, which groups a "cidade inteira" search (one engine job per
 // region) into a single entry and reports searches cut off by a restart as "interrompida".
@@ -475,6 +476,9 @@ function loadLeads(data) {
     category: x.categoria, address: x.endereco, review_rating: x.nota == null ? "" : String(x.nota),
     review_count: x.avaliacoes ? String(x.avaliacoes) : "", whatsapp: x.whatsapp, wa_confirmed: x.whatsapp_confirmado,
     instagram: x.instagram, facebook: x.facebook, linkedin: x.linkedin, relevante: x.relevante,
+    negatives: String(x.avaliacoes_negativas ?? 0), borough: x.bairro || "", cep: x.cep || "", hours: x.horario || "",
+    // One spreadsheet cell: "5★ 14/05/2026: texto | 4★ 02/03/2026: texto"
+    reviews: (x.ultimas_avaliacoes || []).map(a => (a.nota ? a.nota + "★ " : "") + (a.data ? a.data.split("-").reverse().join("/") + ": " : "") + a.texto).join(" | "),
   }));
   current.enriched = false;
   applyEnrichment(loadEnrichment(current.id));
@@ -496,10 +500,12 @@ function showVerify(v) {
     msg.textContent = "Confirmando no WhatsApp: " + v.feitos + " de " + v.total + " números. Você pode fechar a página; a confirmação continua no servidor.";
   } else {
     btn.disabled = false;
-    const ok = current.rows.filter(x => x.wa_confirmed === true).length, checked = current.rows.filter(x => x.wa_confirmed === true || x.wa_confirmed === false).length;
+    // Same base as the stats line: the companies on screen (on-topic only while that filter is on).
+    const base = $("only-relevant").checked ? current.rows.filter(x => x.relevante !== false) : current.rows;
+    const ok = base.filter(x => x.whatsapp && x.wa_confirmed !== false).length, checked = base.filter(x => x.wa_confirmed === true || x.wa_confirmed === false).length;
     msg.textContent = v.erro
       ? "A confirmação parou: " + v.erro + (v.feitos ? " (" + v.feitos + " números já confirmados ficam salvos)" : "")
-      : "Pronto: " + ok + " de " + checked + " números têm WhatsApp. Os que não têm ficam marcados como \"sem WhatsApp\".";
+      : "Pronto: " + ok + " empresas com WhatsApp (" + checked + " números conferidos). As que não têm ficam marcadas como \"sem WhatsApp\".";
   }
 }
 async function pollVerify(job, first) {
@@ -566,7 +572,9 @@ function renderResults() {
     for (const [k, label] of [["instagram", "Instagram"], ["facebook", "Facebook"], ["linkedin", "LinkedIn"]]) if (r[k]) box.append(link(r[k], label + " ↗"));
     if (box.childNodes.length) so.append(box);
     const rt = cell(r.review_rating ? r.review_rating.replace(".", ",") + (r.review_count ? " · " + r.review_count : "") : "", "num");
+    if (Number(r.negatives) > 0) { const s = document.createElement("div"); s.className = "sub"; s.textContent = r.negatives + (r.negatives === "1" ? " negativa" : " negativas"); rt.append(s); }
     const ad = cell(r.address);
+    if (r.hours) { const s = document.createElement("div"); s.className = "sub"; s.textContent = r.hours; ad.append(s); }
     tr.append(t, p, rt, w, so, ad); tb.append(tr);
   }
 }
