@@ -85,7 +85,7 @@ resultados ocupam disco) e a documentação completa fica em `/api/docs`.
 
 O Railway não usa `docker-compose.yml`. Use o `Dockerfile` desta pasta:
 
-1. Crie um serviço a partir deste repositório, com **Root Directory** = `google-maps-scraper`.
+1. Crie um serviço a partir deste repositório (GitHub Repo). O Railway encontra o `Dockerfile` na raiz.
 2. Variável: `PORT=8080`.
 3. Adicione um **volume** montado em `/gmapsdata`.
 4. Plano com pelo menos 1 a 2 GB de RAM, porque o motor roda um Chromium.
