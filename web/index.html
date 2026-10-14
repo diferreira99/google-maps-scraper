@@ -425,6 +425,7 @@ $("form").addEventListener("submit", async (ev) => {
     const body = {
       buscas: terms, cidade: city, idioma: $("lang").value, profundidade: Number($("depth").value),
       raio_m: Number($("radius").value) || 10000, tempo_limite_min: Math.round(Number($("maxtime").value) / 60),
+      reusar_dias: 0,   // this page is for deliberate, fresh searches; the API's reuse is for integrations
     };
     if ($("grid").checked) body.grade = 3;
     if (proxies.length) body.proxies = proxies;

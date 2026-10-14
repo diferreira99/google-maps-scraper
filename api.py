@@ -728,7 +728,47 @@ def create_grid_search(body, terms, city, grade):
              "jobs": ids, "profundidade": int(body.get("profundidade", 10)), "tempo_limite_min": minutes,
              "criada_em": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "pedido": body}
     save_group(group)
-    return {"id": group["id"], "status": "na_fila", "nome": name, "termos": terms, "grade": grade, "regioes": len(ids)}
+    return {"id": group["id"], "status": "na_fila", "nome": name, "termos": terms, "grade": grade, "regioes": len(ids),
+            "reaproveitada": False}
+
+
+def _single_keywords(terms, city):
+    short = city.split(",")[0].strip()
+    return [t if not short or _fold(short) in _fold(t) else f"{t} em {city}" for t in terms]
+
+
+def _same_terms(a, b):
+    norm = lambda xs: sorted(" ".join(_fold(x).split()) for x in xs or [])
+    return norm(a) == norm(b)
+
+
+def find_reusable(terms, city, grade, days):
+    """An earlier identical search (same terms and city, same grid) to answer from instead of going
+    back to Google: one still queued or running (join it), or one finished with results in the last
+    `days` days. Shared across everyone using the API, so popular searches are only scraped once."""
+    jobs = _engine_jobs()
+    groups = list_groups()
+    now = datetime.now(timezone.utc)
+    candidates = []
+    if grade:
+        for g in groups:
+            if g.get("grade") == grade and _fold(g.get("cidade", "")) == _fold(city) and _same_terms(g["termos"], terms):
+                candidates.append((group_summary(g, jobs), g["jobs"]))
+    else:
+        members = {j for g in groups for j in g["jobs"]}
+        wanted = _single_keywords(terms, city)
+        for jid, j in jobs.items():
+            if jid not in members and _same_terms((j.get("Data") or {}).get("keywords"), wanted):
+                candidates.append((job_summary(j), [jid]))
+    for summary, member_ids in sorted(candidates, key=lambda c: c[0].get("criada_em") or "", reverse=True):
+        if summary["status"] in ("na_fila", "buscando"):
+            return {**summary, "reaproveitada": True, "em_andamento": True}
+        created = _parse_date(summary.get("criada_em"))
+        if (summary["status"] == "pronta" and created and (now - created).total_seconds() <= days * 86400
+                and any(_job_rows(jid) for jid in member_ids if jid in jobs)):
+            age_days = round((now - created).total_seconds() / 86400, 1)
+            return {**summary, "reaproveitada": True, "em_andamento": False, "idade_dias": age_days}
+    return None
 
 
 def create_search(body):
@@ -744,6 +784,15 @@ def create_search(body):
             grade = 0
         if not 2 <= grade <= 5:
             raise EngineError(400, '"grade" vai de 2 a 5 (3 divide a cidade em 9 regiões)')
+    try:
+        reuse_days = float(body.get("reusar_dias", 7))
+    except (TypeError, ValueError):
+        reuse_days = 7
+    if reuse_days > 0 and not body.get("forcar_nova") and city:
+        hit = find_reusable(terms, city, grade or 0, reuse_days)
+        if hit:
+            return hit
+    if grade:
         return create_grid_search(body, terms, city, grade)
     lat, lon = body.get("lat"), body.get("lon")
     if not (lat and lon):
@@ -754,7 +803,7 @@ def create_search(body):
             raise EngineError(400, f'não encontrei a cidade "{city}"; use o formato "Cidade, UF"')
         lat, lon = geo
     short = city.split(",")[0].strip()
-    keywords = [t if not short or _fold(short) in _fold(t) else f"{t} em {city}" for t in terms]
+    keywords = _single_keywords(terms, city)
     job = {
         "name": body.get("nome") or (terms[0] + (f" +{len(terms) - 1}" if len(terms) > 1 else "") + (f" · {short}" if short else "")),
         "keywords": keywords, "lang": body.get("idioma", "pt"), "zoom": 15, "lat": str(lat), "lon": str(lon),
@@ -764,7 +813,8 @@ def create_search(body):
     if body.get("proxies"):
         job["proxies"] = body["proxies"]
     _, raw = engine("POST", "/api/v1/jobs", job)
-    return {"id": json.loads(raw).get("id"), "status": "na_fila", "nome": job["name"], "termos": keywords}
+    return {"id": json.loads(raw).get("id"), "status": "na_fila", "nome": job["name"], "termos": keywords,
+            "reaproveitada": False}
 
 
 def delete_search(sid):
@@ -786,7 +836,7 @@ def redo_search(sid):
     """Queue the same search again and delete the old one (for failed or interrupted searches)."""
     group = load_group(sid)
     if group:
-        new = create_search(group["pedido"])
+        new = create_search({**group["pedido"], "forcar_nova": True})
     else:
         _, raw = engine("GET", "/api/v1/jobs/" + urllib.parse.quote(sid))
         j = json.loads(raw)

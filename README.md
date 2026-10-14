@@ -32,6 +32,12 @@ Opcionais: `"buscas": ["contabilidade", "assessoria contábil"]` no lugar de `bu
 `"profundidade": 5`, `"tempo_limite_min": 20`, `"raio_m": 10000`, `"proxies": [...]`.
 Resposta: `{"id": "...", "status": "na_fila", ...}`. O servidor roda uma busca por vez.
 
+**Reaproveitamento (cache):** se já existe uma busca igual (mesmos termos e cidade, e mesma grade),
+a API devolve essa em vez de ir ao Google de novo: na hora, se ela terminou com resultados nos últimos
+7 dias (`"reaproveitada": true`, `"idade_dias": 1.5`), ou a própria busca, se ela ainda está na fila ou
+rodando (`"em_andamento": true`), sem duplicar na fila. Vale para todo mundo que usa a API. Para mudar o
+prazo, mande `"reusar_dias": 3` (0 desliga); para forçar uma busca nova, `"forcar_nova": true`.
+
 **Cidade inteira (opcional):** `"grade": 3` divide a cidade em 3 x 3 = 9 regiões e busca cada uma
 (o Google mostra no máximo uns 120 resultados por busca, então uma cidade grande precisa de várias).
 Vira uma busca só na API: o `status` só fica `pronta` quando todas as regiões terminam, e
