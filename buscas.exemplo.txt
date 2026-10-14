@@ -1,0 +1,5 @@
+# Uma busca por linha. Linhas em branco e começando com # são ignoradas.
+# Rodar: python3 scrape.py --keywords-file buscas.exemplo.txt --city "Belo Horizonte, MG"
+dentistas em Belo Horizonte MG
+ortodontistas em Belo Horizonte MG
+clínicas odontológicas em Belo Horizonte MG

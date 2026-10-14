@@ -1,0 +1,9 @@
+# Segredos
+.env
+
+# Resultados (contêm dados pessoais: nunca commitar)
+*.csv
+results-*.json
+
+__pycache__/
+*.pyc
