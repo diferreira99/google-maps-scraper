@@ -48,7 +48,8 @@ Há outros dois projetos no Railway com um `prospecta-whatsapp` (`diligent-commi
 - **Serviço `google-maps-scraper` (Railway):** `PORT`, `ADMIN_USER`, `ADMIN_PASS` (senha da página do scraper),
   `AUTH_MODO`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `WHATSAPP_CHECK_URL`, `WHATSAPP_CHECK_TOKEN`
   (= `API_TOKEN` do prospecta-whatsapp), `WHATSAPP_CHECK_DELAY_S`. Opcional: `API_TOKENS` (tokens de servidor).
-- **Serviço `prospecta-whatsapp` (Railway):** `API_TOKEN`, `N8N_WEBHOOK_RESPOSTA`, `PROSPECTA_USER_ID`, `SUPABASE_SERVICE_KEY`.
+- **Serviço `prospecta-whatsapp` (Railway):** `API_TOKEN`, `N8N_WEBHOOK_RESPOSTA`, `PROSPECTA_USER_ID`, `SUPABASE_SERVICE_KEY`,
+  `AUTH_DIR=/data/auth_info` (sessão do WhatsApp no volume `whatsapp-sessao`, montado em `/data`).
 - **n8n:** a chave `service_role` do Supabase e a chave da Serper estão **escritas dentro do código dos nós**
   (pendência: mover para credenciais).
 - **SaaS:** só a chave pública (`anon`) do Supabase, que pode ficar no navegador. Tokens do WhatsApp e das IAs
@@ -101,18 +102,16 @@ responde instantaneamente (só aparece em teste).
 
 ## 5. Segurança
 
-**Feito (modo transição desde 14/10/2026):**
+**Feito (modo obrigatório desde 14/10/2026, à noite):**
 - n8n: nó "Verificar Login" depois dos webhooks `iniciar-campanha`, `cancelar-campanha`, `status-campanha`,
   `responder-fila`, `responder-followup` (fluxo "My workflow", `WNS7NFoQb3y4BKac`) e `extrair-leads-serp`
   (fluxo `j8YtObCntdTeb4kf`). Confere o token em `/auth/v1/user` e se o e-mail/userId do pedido é do dono do token.
 - Scraper: página e motor (`/api/*`) atrás de usuário e senha; `/leads` e `/enrich` exigem login do Prospecta+,
   token de servidor ou a senha de admin.
-- **Modo transição** = chamada sem login ainda passa (para a versão antiga do SaaS), login errado é bloqueado.
-
-**Para ligar o modo obrigatório** (depois que o SaaS novo estiver no ar e funcionando):
-1. Railway, `google-maps-scraper`: `AUTH_MODO=obrigatorio`.
-2. n8n: nos 6 nós "Verificar Login…", trocar `const MODO = 'transicao'` por `'obrigatorio'` e publicar os dois fluxos.
-3. Testar: buscar leads, ver métricas, iniciar e cancelar campanha, responder fila e follow-up.
+- **Modo obrigatório** = chamada sem login é bloqueada ("Nao autorizado: faca login de novo"). Railway:
+  `AUTH_MODO=obrigatorio`; n8n: `const MODO = 'obrigatorio'` nos 6 nós. Para voltar à transição (emergência),
+  desfazer os dois e publicar.
+- O webhook `receber-resposta` (chamado pelo servidor do WhatsApp) **não** tem login; pendência: segredo compartilhado.
 
 ## 6. Vercel: particularidades do projeto `prospeera`
 
@@ -127,11 +126,11 @@ responde instantaneamente (só aparece em teste).
 
 ## 7. Pendências (em ordem)
 
-1. **Subir o SaaS novo** e testar; depois **ligar o modo obrigatório** (seção 5).
-2. **Repositório do SaaS no GitHub** + projeto novo no Vercel ligado a ele (deploy automático a cada push).
-3. **`prospecta-whatsapp`:** criar volume em `/app/auth_info` (senão cada deploy derruba a sessão e pede QR de novo)
-   e proteger o webhook `receber-resposta` com um segredo compartilhado (o servidor do WhatsApp manda, o n8n confere).
-   Fazer junto, num horário tranquilo, porque exige escanear o QR uma vez.
+1. ~~Subir o SaaS novo, modo obrigatório, repositório e Vercel~~ (feito: `diferreira99/prospecta-saas`,
+   `prospecta-saas-seven.vercel.app`, deploy automático a cada push na `main`).
+2. ~~Volume do `prospecta-whatsapp`~~ (feito em 14/10). Falta proteger o webhook `receber-resposta` com um segredo
+   compartilhado (o servidor do WhatsApp manda, o n8n confere).
+3. **Mensagem da campanha:** deixar claro o que o produto faz (nome, canal, para quem, preço/teste) no prompt.
 4. **Mover chaves escritas no código do n8n** (Supabase `service_role`, Serper) para credenciais do n8n.
 5. **Revisar os fluxos da Ana** (ligações, agenda, avisos), que não passaram por esta revisão.
 6. Ideias que ficaram para depois: posição na fila ("2º na fila"), vários termos separados por vírgula no campo
@@ -145,3 +144,19 @@ responde instantaneamente (só aparece em teste).
 - **Um termo por busca no SaaS** (visual mais simples); o servidor continua aceitando vários.
 - **Segurança em duas etapas** (transição → obrigatório) para não derrubar o SaaS em produção.
 - **Cache compartilhado entre usuários**: menos fila e menos acessos ao Google quando houver revendedores.
+
+## 9. Trabalho de 13–14/10/2026 (resumo)
+
+- **API:** enriquecimento de redes em segundo plano (`?enriquecer=fundo`) e recuperação automática de buscas
+  interrompidas por reinício (só das últimas 3 horas; ids antigos viram apelido do novo em `reiniciadas.json`).
+- **SaaS:** botões de Instagram/Facebook/LinkedIn com logo, contagem correta do "Verificar WhatsApp", score com
+  celular e avaliações recentes, vários termos no Nicho, aviso de "já contatado", alerta de lead interessado,
+  janela recomendada (seg–sex 7h–12h), celular primeiro na campanha, follow-up padrão no dia 3 (passa pela fila
+  de aprovação), CRM com Ganho/Perdido e valor (R$).
+- **n8n:** IA cita elogios das avaliações; não manda para quem já recebeu em outra campanha (`status_campanha`);
+  A/B que aprende (tom × gatilho, 80% vencedor depois de 60 envios); respostas de robô viram sugestão de opção do
+  menu; contatos fora de campanha são ignorados.
+- **Supabase:** gatilho `trg_preencher_resposta_lead` em `leads` (marca `respondeu` a partir do histórico). Foi
+  criado por bloco `DO`, **fora da tabela de migrações** — recriar à mão se o banco for refeito. Colunas
+  `pipeline_leads.valor` e `fechado_em`.
+
