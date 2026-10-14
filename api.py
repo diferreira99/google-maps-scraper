@@ -565,7 +565,9 @@ def cut_by_restart(j, jobs=None):
     if j.get("Status") != "working" or not _csv_layout_ok():
         return False
     created = _parse_date(j.get("Date"))
-    if not created or created.timestamp() >= BOOT:
+    # Only searches from the last 3 hours: an old stuck one is nobody's open search any more (it shows
+    # as interrompida and can be redone by hand).
+    if not created or created.timestamp() >= BOOT or BOOT - created.timestamp() > 3 * 3600:
         return False
     mtime = _csv_mtime(j.get("ID"))
     if mtime is not None:
