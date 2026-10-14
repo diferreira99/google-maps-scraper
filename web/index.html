@@ -387,8 +387,10 @@ function renderJobs() {
     li.append(top);
 
     const act = document.createElement("div"); act.className = "job-actions";
-    if (j.Status === "ok") {
-      const v = document.createElement("button"); v.type = "button"; v.className = "small"; v.textContent = "Ver resultados";
+    if (status === "ok" || status === "working" || status === "stuck") {
+      // The engine writes the CSV as it goes, so a running or interrupted job already has partial results.
+      const v = document.createElement("button"); v.type = "button"; v.className = "small";
+      v.textContent = status === "ok" ? "Ver resultados" : "Ver parciais";
       v.onclick = () => openResults(j);
       act.append(v);
     }
@@ -397,12 +399,13 @@ function renderJobs() {
       redo.onclick = () => redoJob(j, redo);
       act.append(redo);
     }
-    if (status !== "working") {
-      const del = document.createElement("button"); del.type = "button"; del.className = "small danger"; del.textContent = "Apagar";
+    {
+      const label = status === "working" ? "Parar e apagar" : "Apagar";
+      const del = document.createElement("button"); del.type = "button"; del.className = "small danger"; del.textContent = label;
       del.onclick = () => {
         if (!del.classList.contains("armed")) {
           del.classList.add("armed"); del.textContent = "Confirmar exclusão";
-          setTimeout(() => { del.classList.remove("armed"); del.textContent = "Apagar"; }, 4000);
+          setTimeout(() => { del.classList.remove("armed"); del.textContent = label; }, 4000);
           return;
         }
         deleteJob(j);
@@ -515,7 +518,9 @@ async function openResults(j) {
     renderResults();
     $("results").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
   } catch (e) {
-    $("stats").textContent = "Não consegui carregar os resultados: " + e.message;
+    $("stats").textContent = /404|not found|no such/i.test(e.message)
+      ? "Esta busca ainda não gravou nenhum resultado. Espere um pouco e tente de novo."
+      : "Não consegui carregar os resultados: " + e.message;
   }
 }
 
