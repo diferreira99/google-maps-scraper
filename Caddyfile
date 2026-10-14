@@ -1,0 +1,14 @@
+{
+	admin off
+}
+
+:{$PORT:8080} {
+	encode gzip
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle {
+		root * /srv
+		file_server
+	}
+}

@@ -1,0 +1,530 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Buscar Leads no Maps</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Public+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: ferramenta de duas colunas (formulário + histórico), resultados em largura total embaixo. */
+:root {
+  --bg: #f3f5f2;
+  --surface: #ffffff;
+  --fg: #17221d;
+  --muted: #5b6b63;
+  --line: #d9e0db;
+  --accent: #0d6b55;
+  --accent-ink: #ffffff;
+  --accent-soft: #e0efe9;
+  --ok: #17803d;
+  --ok-soft: #e1f3e6;
+  --run: #a15c00;
+  --run-soft: #fbefd9;
+  --bad: #b3261e;
+  --bad-soft: #fbe3e1;
+  --font-display: "Bricolage Grotesque", "Public Sans", system-ui, sans-serif;
+  --font-body: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101613;
+    --surface: #17201c;
+    --fg: #e4ece7;
+    --muted: #94a69c;
+    --line: #2a3731;
+    --accent: #3fbf98;
+    --accent-ink: #06231a;
+    --accent-soft: #173a2f;
+    --ok: #5fd08a;
+    --ok-soft: #173524;
+    --run: #f0b35a;
+    --run-soft: #3a2b12;
+    --bad: #f28b82;
+    --bad-soft: #3d1c1a;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 var(--font-body);
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 64px; display: grid; gap: 24px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+h1 { font: 700 clamp(26px, 4vw, 34px)/1.1 var(--font-display); letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h1 .pin { color: var(--accent); }
+header p { margin: 0; color: var(--muted); max-width: 60ch; }
+h2 { font: 600 19px/1.2 var(--font-display); margin: 0; }
+.cols { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 24px; align-items: start; }
+@media (max-width: 860px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; display: grid; gap: 16px; min-width: 0; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+form { display: grid; gap: 14px; }
+.field { display: grid; gap: 6px; }
+label, .label { font-weight: 600; font-size: 13px; }
+.hint { color: var(--muted); font-size: 12.5px; margin: 0; }
+input[type=text], input[type=number], textarea, select {
+  width: 100%; font: inherit; color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
+}
+textarea { resize: vertical; min-height: 84px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.check { display: flex; gap: 10px; align-items: flex-start; font-weight: 500; font-size: 14px; }
+.check input { margin-top: 3px; accent-color: var(--accent); width: 16px; height: 16px; }
+details { border-top: 1px dashed var(--line); padding-top: 12px; }
+details summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); }
+details[open] summary { margin-bottom: 12px; }
+details .grid { display: grid; gap: 12px; }
+
+button, .btn {
+  font: 600 14px/1 var(--font-body); border-radius: 8px; padding: 10px 14px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); color: var(--fg); text-decoration: none;
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+}
+button:hover, .btn:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); padding: 12px 16px; font-size: 15px; justify-content: center; }
+button.primary:hover { filter: brightness(1.08); }
+button:disabled { opacity: .55; cursor: progress; }
+button.small, .btn.small { padding: 7px 10px; font-size: 13px; }
+button.danger { color: var(--bad); }
+button.danger.armed { background: var(--bad); color: var(--surface); border-color: var(--bad); }
+
+.msg { border-radius: 8px; padding: 10px 12px; font-size: 14px; margin: 0; }
+.msg.err { background: var(--bad-soft); color: var(--bad); }
+.msg.info { background: var(--accent-soft); color: var(--fg); }
+
+.jobs { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.job { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 8px; min-width: 0; }
+.job.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.job-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.job-name { font-weight: 600; overflow-wrap: anywhere; }
+.job-meta { color: var(--muted); font-size: 12.5px; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.job-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.pill { font: 500 12px/1 var(--font-mono); padding: 5px 8px; border-radius: 99px; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+.pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.working, .pill.pending { background: var(--run-soft); color: var(--run); }
+.pill.working::before { animation: pulse 1.2s ease-in-out infinite; }
+.pill.failed { background: var(--bad-soft); color: var(--bad); }
+@keyframes pulse { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .pill.working::before { animation: none; } }
+.empty { color: var(--muted); font-size: 14px; border: 1px dashed var(--line); border-radius: 8px; padding: 18px; margin: 0; }
+
+.stats { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 14px; color: var(--muted); }
+.stats b { color: var(--fg); font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.toolbar input[type=text] { width: auto; flex: 1 1 200px; padding: 8px 10px; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; max-height: 70vh; }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { position: sticky; top: 0; background: var(--surface); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); font-weight: 600; z-index: 1; }
+td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td .sub { color: var(--muted); font-size: 12.5px; }
+td a { color: var(--accent); }
+.nowrap { white-space: nowrap; }
+.wa { font-size: 12px; font-weight: 600; }
+footer { color: var(--muted); font-size: 12.5px; max-width: 80ch; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Buscar leads <span class="pin">no Maps</span></h1>
+    <p>Digite o tipo de negócio e a cidade. A busca roda no servidor e leva de 2 a 10 minutos; você pode fechar a página e voltar depois.</p>
+  </header>
+
+  <div class="cols">
+    <section class="panel" aria-labelledby="t-nova">
+      <h2 id="t-nova">Nova busca</h2>
+      <form id="form" novalidate>
+        <div class="field">
+          <label for="kw">O que buscar</label>
+          <textarea id="kw" rows="3" placeholder="dentistas&#10;clínicas odontológicas" required></textarea>
+          <p class="hint">Uma busca por linha. A cidade é adicionada a cada linha automaticamente.</p>
+        </div>
+        <div class="field">
+          <label for="city">Cidade</label>
+          <input type="text" id="city" placeholder="Belo Horizonte, MG" autocomplete="off" required>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="depth">Profundidade</label>
+            <select id="depth">
+              <option value="2">2 · rápida</option>
+              <option value="5" selected>5 · padrão</option>
+              <option value="10">10 · mais resultados</option>
+              <option value="20">20 · máximo</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="maxtime">Tempo limite</label>
+            <select id="maxtime">
+              <option value="300">5 min</option>
+              <option value="600" selected>10 min</option>
+              <option value="1200">20 min</option>
+              <option value="1800">30 min</option>
+            </select>
+          </div>
+        </div>
+        <label class="check"><input type="checkbox" id="email" checked> Buscar e-mails nos sites das empresas (mais lento)</label>
+        <details>
+          <summary>Opções avançadas</summary>
+          <div class="grid">
+            <div class="row">
+              <div class="field">
+                <label for="radius">Raio (metros)</label>
+                <input type="number" id="radius" value="10000" min="500" step="500">
+              </div>
+              <div class="field">
+                <label for="lang">Idioma</label>
+                <select id="lang">
+                  <option value="pt" selected>Português</option>
+                  <option value="en">Inglês</option>
+                  <option value="es">Espanhol</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label for="proxies">Proxies (opcional)</label>
+              <textarea id="proxies" rows="2" placeholder="socks5://usuario:senha@host:porta"></textarea>
+              <p class="hint">Um por linha. Use se as buscas começarem a falhar ou voltar vazias.</p>
+            </div>
+          </div>
+        </details>
+        <p class="msg err" id="form-err" hidden></p>
+        <button class="primary" type="submit" id="go">Iniciar busca</button>
+      </form>
+    </section>
+
+    <section class="panel" aria-labelledby="t-hist">
+      <div class="panel-head">
+        <h2 id="t-hist">Buscas</h2>
+        <button class="small" type="button" id="refresh">Atualizar</button>
+      </div>
+      <p class="msg err" id="jobs-err" hidden></p>
+      <ul class="jobs" id="jobs"></ul>
+      <p class="empty" id="jobs-empty" hidden>Nenhuma busca ainda. Preencha o formulário ao lado e clique em <b>Iniciar busca</b>.</p>
+    </section>
+  </div>
+
+  <section class="panel" id="results" aria-labelledby="t-res" hidden>
+    <div class="panel-head">
+      <h2 id="t-res">Resultados</h2>
+      <div class="toolbar">
+        <button type="button" class="small" id="dl-clean">Baixar planilha</button>
+        <a class="btn small" id="dl-full" href="#">CSV completo (34 colunas)</a>
+      </div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="toolbar">
+      <input type="text" id="filter" placeholder="Filtrar por nome, categoria, bairro…" aria-label="Filtrar resultados">
+      <label class="check"><input type="checkbox" id="only-email"> Só com e-mail</label>
+      <label class="check"><input type="checkbox" id="only-phone"> Só com telefone</label>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Empresa</th><th>Telefone</th><th>E-mail</th><th>Site</th><th>Nota</th><th>Endereço</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    Raspar o Google Maps viola os Termos de Serviço do Google, e telefones e e-mails são dados pessoais: use com a LGPD em mente (base legal, opção de descadastro, nada de spam). Muitas buscas seguidas podem fazer o Google bloquear o servidor por algumas horas; rode uma por vez.
+  </footer>
+</div>
+
+<script>
+const API = "/api/v1/jobs";
+const LEAD = ["title", "phone", "emails", "website", "category", "address", "review_rating", "review_count"];
+const HEAD_PT = { title: "Empresa", phone: "Telefone", emails: "E-mail", website: "Site", category: "Categoria", address: "Endereço", review_rating: "Nota", review_count: "Avaliações", whatsapp: "WhatsApp" };
+const STATUS_PT = { pending: "na fila", working: "buscando", ok: "pronta", failed: "falhou" };
+const $ = (id) => document.getElementById(id);
+
+let jobs = [];
+let current = null;     // { id, name, rows }
+let pollTimer = null;
+
+// ---------- API ----------
+async function api(path, opts = {}) {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (!r.ok) {
+    let msg = "HTTP " + r.status;
+    try { const j = await r.json(); if (j.message) msg = j.message; } catch {}
+    throw new Error(msg);
+  }
+  return r;
+}
+
+async function geocode(place) {
+  const q = new URLSearchParams({ format: "json", limit: "1", q: place });
+  const r = await fetch("https://nominatim.openstreetmap.org/search?" + q, { headers: { "Accept-Language": "pt-BR" } });
+  if (!r.ok) throw new Error("Não consegui localizar a cidade (serviço de mapas respondeu " + r.status + ").");
+  const hits = await r.json();
+  if (!hits.length) throw new Error("Não encontrei \"" + place + "\". Tente no formato Cidade, UF.");
+  return { lat: String(hits[0].lat), lon: String(hits[0].lon) };
+}
+
+// ---------- CSV ----------
+function parseCSV(text) {
+  const rows = []; let row = []; let field = ""; let q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; }
+      else field += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(field); field = ""; rows.push(row); row = [];
+    } else field += c;
+  }
+  if (field !== "" || row.length) { row.push(field); rows.push(row); }
+  const head = rows.shift() || [];
+  return rows.filter(r => r.length > 1 || r[0]).map(r => Object.fromEntries(head.map((h, i) => [h.trim(), (r[i] ?? "").trim()])));
+}
+
+function cleanEmails(v) {
+  if (!v) return "";
+  return v.replace(/[\[\]"]/g, "").split(/[,;\s]+/).filter(e => e.includes("@")).filter((e, i, a) => a.indexOf(e) === i).join(", ");
+}
+
+function waNumber(phone) {
+  let d = (phone || "").replace(/\D/g, "");
+  if (!d) return "";
+  if (d.startsWith("0")) d = d.replace(/^0+/, "");
+  if (d.length === 10 || d.length === 11) d = "55" + d;
+  // Só celulares brasileiros (9 dígitos depois do DDD) têm WhatsApp com certeza razoável.
+  if (!(d.startsWith("55") && d.length === 13 && d[4] === "9")) return "";
+  return d;
+}
+
+function toCSV(rows, cols) {
+  const esc = (v) => /[";\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  const lines = [cols.map(c => HEAD_PT[c] || c).join(";")];
+  for (const r of rows) lines.push(cols.map(c => esc(String(r[c] ?? ""))).join(";"));
+  return "﻿" + lines.join("\r\n");
+}
+
+function saveFile(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function slug(s) {
+  return (s || "busca").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "busca";
+}
+
+// ---------- Jobs list ----------
+function fmtDate(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  return d.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+async function loadJobs() {
+  try {
+    const r = await api(API);
+    const data = await r.json();
+    jobs = (Array.isArray(data) ? data : []).sort((a, b) => new Date(b.Date) - new Date(a.Date));
+    $("jobs-err").hidden = true;
+  } catch (e) {
+    $("jobs-err").textContent = "Não consegui falar com o scraper: " + e.message + ". Se o serviço acabou de reiniciar, espere um minuto e clique em Atualizar.";
+    $("jobs-err").hidden = false;
+  }
+  renderJobs();
+  schedulePoll();
+}
+
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  if (jobs.some(j => j.Status === "pending" || j.Status === "working")) pollTimer = setTimeout(loadJobs, 6000);
+}
+
+function renderJobs() {
+  const ul = $("jobs");
+  ul.textContent = "";
+  $("jobs-empty").hidden = jobs.length > 0;
+  for (const j of jobs) {
+    const li = document.createElement("li");
+    li.className = "job" + (current && current.id === j.ID ? " selected" : "");
+    const kws = (j.Data && j.Data.keywords) || [];
+    const top = document.createElement("div"); top.className = "job-top";
+    const name = document.createElement("div");
+    const n = document.createElement("div"); n.className = "job-name"; n.textContent = j.Name || kws[0] || "Busca";
+    const meta = document.createElement("div"); meta.className = "job-meta";
+    meta.textContent = [fmtDate(j.Date), kws.length + (kws.length === 1 ? " termo" : " termos"), "prof. " + ((j.Data && j.Data.depth) || "?")].join(" · ");
+    name.append(n, meta);
+    const pill = document.createElement("span");
+    pill.className = "pill " + j.Status; pill.textContent = STATUS_PT[j.Status] || j.Status;
+    top.append(name, pill);
+    li.append(top);
+
+    const act = document.createElement("div"); act.className = "job-actions";
+    if (j.Status === "ok") {
+      const v = document.createElement("button"); v.type = "button"; v.className = "small"; v.textContent = "Ver resultados";
+      v.onclick = () => openResults(j);
+      act.append(v);
+    }
+    if (j.Status !== "working") {
+      const del = document.createElement("button"); del.type = "button"; del.className = "small danger"; del.textContent = "Apagar";
+      del.onclick = () => {
+        if (!del.classList.contains("armed")) {
+          del.classList.add("armed"); del.textContent = "Confirmar exclusão";
+          setTimeout(() => { del.classList.remove("armed"); del.textContent = "Apagar"; }, 4000);
+          return;
+        }
+        deleteJob(j);
+      };
+      act.append(del);
+    }
+    if (j.Status === "failed") {
+      const s = document.createElement("span"); s.className = "hint";
+      s.textContent = "Pode ser bloqueio temporário do Google. Espere, reduza a profundidade ou use proxies.";
+      act.append(s);
+    }
+    if (act.childNodes.length) li.append(act);
+    ul.append(li);
+  }
+}
+
+async function deleteJob(j) {
+  try {
+    await api(API + "/" + encodeURIComponent(j.ID), { method: "DELETE" });
+    if (current && current.id === j.ID) { current = null; $("results").hidden = true; }
+  } catch (e) {
+    $("jobs-err").textContent = "Não consegui apagar: " + e.message; $("jobs-err").hidden = false;
+  }
+  loadJobs();
+}
+
+// ---------- New search ----------
+$("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const err = $("form-err"); err.hidden = true;
+  const city = $("city").value.trim();
+  const terms = $("kw").value.split("\n").map(s => s.trim()).filter(Boolean);
+  if (!terms.length) { err.textContent = "Escreva pelo menos uma busca, por exemplo: dentistas."; err.hidden = false; $("kw").focus(); return; }
+  if (!city) { err.textContent = "Informe a cidade, por exemplo: Belo Horizonte, MG."; err.hidden = false; $("city").focus(); return; }
+  const go = $("go"); go.disabled = true; go.textContent = "Localizando a cidade…";
+  try {
+    const { lat, lon } = await geocode(city);
+    const cityShort = city.split(",")[0].trim();
+    const keywords = terms.map(t => t.toLowerCase().includes(cityShort.toLowerCase()) ? t : t + " em " + city);
+    const proxies = $("proxies").value.split("\n").map(s => s.trim()).filter(Boolean);
+    const body = {
+      name: terms[0] + (terms.length > 1 ? " +" + (terms.length - 1) : "") + " · " + cityShort,
+      keywords, lang: $("lang").value, zoom: 15, lat, lon, fast_mode: false,
+      radius: Number($("radius").value) || 10000, depth: Number($("depth").value),
+      email: $("email").checked, max_time: Number($("maxtime").value),
+    };
+    if (proxies.length) body.proxies = proxies;
+    go.textContent = "Enviando…";
+    await api(API, { method: "POST", body: JSON.stringify(body) });
+    $("kw").value = "";
+    await loadJobs();
+  } catch (e) {
+    err.textContent = e.message; err.hidden = false;
+  } finally {
+    go.disabled = false; go.textContent = "Iniciar busca";
+  }
+});
+
+$("refresh").onclick = loadJobs;
+
+// ---------- Results ----------
+async function openResults(j) {
+  $("results").hidden = false;
+  $("stats").textContent = "Carregando resultados…";
+  $("rows").textContent = "";
+  current = { id: j.ID, name: j.Name, rows: [] };
+  renderJobs();
+  $("dl-full").href = API + "/" + encodeURIComponent(j.ID) + "/download";
+  $("dl-full").setAttribute("download", slug(j.Name) + "-completo.csv");
+  try {
+    const r = await api(API + "/" + encodeURIComponent(j.ID) + "/download");
+    const raw = parseCSV(await r.text());
+    const seen = new Set();
+    current.rows = raw.filter(x => {
+      const k = x.place_id || x.cid || x.link || (x.title + "|" + x.address);
+      if (seen.has(k)) return false; seen.add(k); return true;
+    }).map(x => {
+      const o = {};
+      for (const c of LEAD) o[c] = x[c] || "";
+      o.emails = cleanEmails(o.emails);
+      const w = waNumber(o.phone);
+      o.whatsapp = w ? "https://wa.me/" + w : "";
+      return o;
+    });
+    renderResults();
+    $("results").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  } catch (e) {
+    $("stats").textContent = "Não consegui carregar os resultados: " + e.message;
+  }
+}
+
+function filtered() {
+  const q = $("filter").value.trim().toLowerCase();
+  return current.rows.filter(r =>
+    (!$("only-email").checked || r.emails) &&
+    (!$("only-phone").checked || r.phone) &&
+    (!q || (r.title + " " + r.category + " " + r.address).toLowerCase().includes(q)));
+}
+
+function cell(text, cls) { const td = document.createElement("td"); if (cls) td.className = cls; if (text) td.textContent = text; return td; }
+function link(href, text) { const a = document.createElement("a"); a.href = href; a.target = "_blank"; a.rel = "noopener"; a.textContent = text; return a; }
+
+function renderResults() {
+  const all = current.rows, rows = filtered();
+  const n = all.length, withEmail = all.filter(r => r.emails).length, withPhone = all.filter(r => r.phone).length, withWa = all.filter(r => r.whatsapp).length;
+  const pct = (x) => n ? " (" + Math.round(100 * x / n) + "%)" : "";
+  const stats = $("stats"); stats.textContent = "";
+  for (const [label, val] of [["Empresas", n], ["Com telefone", withPhone + pct(withPhone)], ["Celular / WhatsApp", withWa + pct(withWa)], ["Com e-mail", withEmail + pct(withEmail)]]) {
+    const s = document.createElement("span"); s.append(label + ": "); const b = document.createElement("b"); b.textContent = val; s.append(b); stats.append(s);
+  }
+  if (rows.length !== n) { const s = document.createElement("span"); s.textContent = "Mostrando " + rows.length; stats.append(s); }
+
+  const tb = $("rows"); tb.textContent = "";
+  if (!n) {
+    const tr = document.createElement("tr"); const td = cell("A busca terminou sem resultados. Tente aumentar o raio, a profundidade ou usar um termo mais amplo."); td.colSpan = 6; tr.append(td); tb.append(tr); return;
+  }
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    const t = cell(); const nm = document.createElement("div"); nm.textContent = r.title; const sub = document.createElement("div"); sub.className = "sub"; sub.textContent = r.category; t.append(nm, sub);
+    const p = cell("", "nowrap"); if (r.phone) { p.append(r.phone); if (r.whatsapp) { p.append(document.createElement("br")); const a = link(r.whatsapp, "WhatsApp ↗"); a.className = "wa"; p.append(a); } }
+    const e = cell(r.emails);
+    const w = cell(); if (r.website) { const href = /^https?:\/\//i.test(r.website) ? r.website : "https://" + r.website; w.append(link(href, r.website.replace(/^https?:\/\/(www\.)?/i, "").replace(/\/$/, ""))); }
+    const rt = cell(r.review_rating ? r.review_rating.replace(".", ",") + (r.review_count ? " · " + r.review_count : "") : "", "num");
+    const ad = cell(r.address);
+    tr.append(t, p, e, w, rt, ad); tb.append(tr);
+  }
+}
+
+for (const id of ["filter", "only-email", "only-phone"]) $(id).addEventListener("input", () => current && renderResults());
+$("dl-clean").onclick = () => {
+  if (!current) return;
+  saveFile(slug(current.name) + ".csv", toCSV(filtered(), [...LEAD, "whatsapp"]), "text/csv;charset=utf-8");
+};
+
+// Lembra a última cidade usada neste navegador.
+try { const c = localStorage.getItem("gm-city"); if (c) $("city").value = c; } catch {}
+$("city").addEventListener("change", () => { try { localStorage.setItem("gm-city", $("city").value.trim()); } catch {} });
+
+loadJobs();
+</script>
+</body>
+</html>

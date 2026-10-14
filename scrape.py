@@ -305,7 +305,7 @@ def main():
     ap.add_argument("--keywords-file", help="file with one keyword per line (batch)")
     ap.add_argument("--city", help="city/place to auto-geocode for lat/lon")
     ap.add_argument("--depth", type=int, default=5)
-    ap.add_argument("--lang", default="pt-BR", help="Google Maps result language (default: pt-BR)")
+    ap.add_argument("--lang", default="pt", help="Google Maps result language, 2 letters (default: pt)")
     # Emails are ON by default (they're the most valuable lead field). Visits each business
     # website to find an address — a bit slower. Use --no-email to skip for a fast run.
     ap.add_argument("--email", dest="email", action="store_true", default=True, help=argparse.SUPPRESS)

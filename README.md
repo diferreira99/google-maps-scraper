@@ -7,6 +7,13 @@ que usa o motor open-source [gosom/google-maps-scraper](https://github.com/gosom
 
 Este guia reúne o que a skill do Claude Code do kit ensinava, para usar sem a skill.
 
+## Página "Buscar leads"
+
+O `Dockerfile` sobe o motor e uma página em português (`web/index.html`) no mesmo endereço. Nela você
+digita o tipo de negócio e a cidade, acompanha as buscas e baixa a planilha já limpa (separada por `;`,
+abre direto no Excel), com link de WhatsApp para celulares. O Caddy serve a página em `/` e repassa
+`/api/*` para o motor. A interface original do motor deixa de ficar acessível.
+
 ## Como funciona
 
 1. O **motor** roda num container Docker e expõe uma API em `http://localhost:8080`. Ele abre o
@@ -17,13 +24,13 @@ Este guia reúne o que a skill do Claude Code do kit ensinava, para usar sem a s
 ## Rodar no seu computador
 
 ```bash
-docker compose up -d                          # sobe o motor (1ª vez baixa a imagem)
+docker compose up -d --build                  # sobe o motor + página (1ª vez baixa a imagem)
 curl http://localhost:8080/api/v1/jobs        # deve responder [] ou uma lista
 
 python3 scrape.py "dentistas em Belo Horizonte MG" --city "Belo Horizonte, MG" --depth 5
 ```
 
-No Windows use `py scrape.py ...`. Interface web do motor: http://localhost:8080.
+No Windows use `py scrape.py ...`. Página de busca: http://localhost:8080.
 
 ### Opções do `scrape.py`
 
@@ -35,7 +42,7 @@ No Windows use `py scrape.py ...`. Interface web do motor: http://localhost:8080
 | `--keywords-file buscas.txt` | Várias buscas num job só (ver `buscas.exemplo.txt`) |
 | `--socials` | Acrescenta Instagram, Facebook e LinkedIn achados no site de cada empresa |
 | `--no-email` | Pula a busca de e-mails (mais rápido) |
-| `--lang pt-BR` | Idioma dos resultados (padrão `pt-BR`) |
+| `--lang pt` | Idioma dos resultados, 2 letras (padrão `pt`; o motor recusa `pt-BR`) |
 | `--out arquivo.csv` / `--json` | Nome e formato da saída. Padrão: `results-<id>.csv` |
 | `--full` / `--fields a,b,c` | Todas as ~34 colunas, ou as colunas que você escolher |
 
@@ -54,7 +61,7 @@ curl -s -X POST http://localhost:8080/api/v1/jobs -H "Content-Type: application/
   "keywords": ["dentistas em Belo Horizonte MG"],
   "lat": "-19.9167", "lon": "-43.9345",
   "max_time": 600,
-  "depth": 5, "lang": "pt-BR", "zoom": 15, "radius": 10000,
+  "depth": 5, "lang": "pt", "zoom": 15, "radius": 10000,
   "email": true, "fast_mode": false
 }'
 # → {"id":"<uuid>"}

@@ -12,11 +12,10 @@ services:
     # version that is still hosted.
     # The published image is linux/amd64. On Apple Silicon (M1/M2/M3) it runs under emulation.
     # If the container won't start there, uncomment the 'platform' line below. Default: commented out.
-    image: gosom/google-maps-scraper:v1.18.1
+    build: .   # Dockerfile: engine image + the "Buscar leads" page on the same port
     # platform: linux/amd64
     container_name: gmaps-scraper
     restart: unless-stopped
-    command: ["-web", "-data-folder", "/gmapsdata"]
     ports:
       # Host port comes from SCRAPER_PORT in .env (default 8080). The container side stays 8080.
       - "127.0.0.1:${SCRAPER_PORT:-8080}:8080"   # localhost only, see the warning above

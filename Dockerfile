@@ -1,7 +1,12 @@
-# Para o Railway (ou qualquer host que compila um Dockerfile em vez de usar docker-compose).
-# Mesma imagem e argumentos do docker-compose.yml. O motor escuta na porta 8080.
-# ATENÇÃO: o motor não tem autenticação. No Railway, NÃO gere domínio público;
-# acesse pela rede privada: http://<nome-do-servico>.railway.internal:8080
+# Motor do scraper + página "Buscar leads" no mesmo endereço.
+# O Caddy serve a página em / e repassa /api/* para o motor, que escuta só em 127.0.0.1:8081.
+# ATENÇÃO: não há autenticação. Quem tiver a URL pode usar o scraper.
+FROM caddy:2.8.4 AS caddy
+
 FROM gosom/google-maps-scraper:v1.18.1
+COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
+COPY Caddyfile /etc/caddy/Caddyfile
+COPY web/ /srv/
+COPY start.sh /start.sh
 EXPOSE 8080
-CMD ["-web", "-data-folder", "/gmapsdata"]
+ENTRYPOINT ["/bin/sh", "/start.sh"]
