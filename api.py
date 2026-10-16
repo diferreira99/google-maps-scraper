@@ -714,6 +714,19 @@ def serper_buscar(q, quem):
     return res
 
 
+def bio_instagram(r):
+    """Trecho da bio que o Google mostra do perfil, sem a parte automática do Instagram
+    ('1.234 seguidores, 56 seguindo, 78 publicações - Ver fotos e vídeos...'). Vazio se não sobrar nada útil."""
+    t = re.sub(r"\s+", " ", (r.get("snippet") or "")).strip()
+    t = re.sub(r"(?i)[\d.,]+\s*(?:mil\s*|k\s*|mi\s*)?(?:seguidores|followers|seguindo|following|publica[çc][õo]es|posts)\b[,·.\s-]*", "", t)
+    t = re.sub(r"(?i)(?:ver|see)\s+(?:fotos|photos|instagram).*?(?:\)|$)", "", t)
+    t = re.sub(r"(?i)^\s*[-–·:]+\s*|\s*[-–·:]+\s*$", "", t).strip(" .-–·")
+    t = re.sub(r"(?i)\binstagram\b\s*", "", t).strip()
+    if len(t) < 12 or not re.search(r"[a-zà-ú]{4,}", t, re.I):
+        return ""
+    return t[:220]
+
+
 def _provas(texto, lead):
     """-> (forte, cidade): o telefone ou o site da empresa aparecem (forte)? a cidade aparece?"""
     t, dig = _fold_simples(texto), re.sub(r"\D", "", texto)
@@ -774,6 +787,9 @@ def redes_pelo_google(lead, faltam, quem):
             handle = link.rstrip("/").rsplit("/", 1)[-1] if tipo == "instagram" else ""
             if tipo == "instagram" and _e_desta_empresa(r["title"] + " " + r["snippet"] + " " + handle, lead):
                 out["instagram"] = link
+                bio = bio_instagram(r)
+                if bio:
+                    out["instagram_bio"] = bio
                 break
     if "linkedin" in faltam:
         for r in serper_buscar(f'site:linkedin.com/company "{nome}" {cidade}'.strip(), quem):
