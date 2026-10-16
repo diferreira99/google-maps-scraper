@@ -11,6 +11,9 @@ Clean leads (for Prospecta, n8n or any other integration):
                                 leads now with "enriquecimento": andamento|pronto|aguardando)
   DELETE /leads/buscas/{id}
 
+Google lookup (Serper) for what the business site did not have, login required, cached, capped per day:
+  POST   /leads/redes-google    {"leads": [{"id": "...", "nome": "...", "cidade": "...", "faltam": ["instagram","linkedin","decisor"]}]}
+
 Socials lookup used by the page:
   POST   /enrich                {"sites": ["https://example.com", ...]}   (max 20 per request)
 
@@ -25,7 +28,8 @@ background; the response's "verificacao" field shows progress until "rodando" is
 
 Env: ENGINE_URL (default http://127.0.0.1:8081), CACHE_DIR (default /gmapsdata/leads-cache),
      WHATSAPP_CHECK_URL + WHATSAPP_CHECK_TOKEN (Prospecta server and its API_TOKEN),
-     WHATSAPP_CHECK_DELAY_S (pause between checks, default 2)
+     WHATSAPP_CHECK_DELAY_S (pause between checks, default 2),
+     SERPER_API_KEY (Google lookup), SERPER_LIMITE_DIA (default 800), SERPER_LIMITE_USUARIO_DIA (default 300)
 """
 import argparse, base64, csv, hashlib, hmac, io, ipaddress, json, os, re, socket, sys, threading, time, unicodedata, uuid
 from datetime import datetime, timezone
@@ -107,11 +111,181 @@ def find_whatsapp(html):
     return ""
 
 
-def enrich_site(site):
-    home = scrape._fetch_cached(site)
-    out = scrape._find_socials(home)
-    out["whatsapp"] = find_whatsapp(home)
+# ── Limpeza dos links de redes ───────────────────────────────────────────────
+_REDE_SKIP = scrape._SKIP_HANDLE | {"share", "sharer.php", "shareArticle", "sharing", "accounts", "direct", "web",
+                                    "watch", "embed", "oauth", "feed", "jobs", "pub", "company", "in", "school"}
+
+
+def normalizar_rede(url):
+    """-> ('instagram'|'facebook'|'linkedin'|'linkedin_pessoa', link limpo) ou ('', '').
+    Tira parâmetros de rastreio (?utm=, ?igshid=), links de compartilhar e páginas genéricas."""
+    u = str(url or "").strip().replace("\\/", "/").replace("\\", "")
+    if not u:
+        return "", ""
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u.lstrip("/")
+    try:
+        p = urllib.parse.urlparse(u)
+    except ValueError:
+        return "", ""
+    host = (p.hostname or "").lower()
+    partes = [x for x in p.path.split("/") if x]
+    if host.endswith("instagram.com") and partes:
+        h = partes[0].lower()
+        if h in _REDE_SKIP or not re.fullmatch(r"[a-z0-9_.]{2,30}", h) or h.startswith(".") or ".." in h:
+            return "", ""
+        return "instagram", "https://www.instagram.com/" + h + "/"
+    if (host.endswith("facebook.com") or host.endswith("fb.com")) and partes:
+        h = partes[0]
+        if h.lower() in _REDE_SKIP or h.isdigit() or len(h) < 3 or h.endswith(".php"):
+            return "", ""
+        return "facebook", "https://www.facebook.com/" + h + "/"
+    if host.endswith("linkedin.com") and len(partes) >= 2 and partes[0].lower() in ("company", "in", "school"):
+        slug = urllib.parse.unquote(partes[1]).strip()
+        if not slug or slug.lower() in _REDE_SKIP:
+            return "", ""
+        slug = urllib.parse.quote(slug, safe="-_.~")
+        if partes[0].lower() == "in":
+            return "linkedin_pessoa", "https://www.linkedin.com/in/" + slug + "/"
+        return "linkedin", "https://www.linkedin.com/" + partes[0].lower() + "/" + slug + "/"
+    return "", ""
+
+
+_LINK_REDE_RE = re.compile(r"""https?:\\?/\\?/(?:[a-z]{2,3}\.|www\.|m\.|web\.)?(?:instagram\.com|facebook\.com|fb\.com|linkedin\.com)/[^\s"'<>()]+""", re.I)
+
+
+def redes_da_pagina(html):
+    """Todas as redes da página, já limpas: a página da empresa no LinkedIn nunca é trocada pelo perfil de
+    uma pessoa; perfis pessoais (/in/) vão para a lista de pessoas."""
+    out = {"instagram": "", "facebook": "", "linkedin": "", "linkedin_pessoas": []}
+    for m in _LINK_REDE_RE.finditer(html or ""):
+        tipo, link = normalizar_rede(m.group(0))
+        if tipo == "linkedin_pessoa":
+            if link not in out["linkedin_pessoas"]:
+                out["linkedin_pessoas"].append(link)
+        elif tipo and not out[tipo]:
+            out[tipo] = link
+    out["linkedin_pessoas"] = out["linkedin_pessoas"][:5]
     return out
+
+
+# ── Quem decide: nomes com cargo no site ─────────────────────────────────────
+_CARGO = (r"(?i:s[óo]ci[oa](?:[\s-]+(?:fundador[a]?|propriet[áa]ri[oa]|diretor[a]?|administrador[a]?|gerente))?"
+          r"|co-?fundador[a]?|fundador[a]?|propriet[áa]ri[oa]|ceo|c\.e\.o\.?|diretor[a]?(?:[\s-]+(?:geral|executiv[oa]|comercial|cl[íi]nic[oa]|t[ée]cnic[oa]))?"
+          r"|gerente[\s-]+geral|respons[áa]vel[\s-]+t[ée]cnic[oa]|administrador[a]?|presidente)")
+_PALAVRA = r"[A-ZÁÉÍÓÚÂÊÔÃÕÇ][a-záéíóúâêôãõçü']{1,20}"
+_NOME = r"((?:Dra?\.?\s+)?" + _PALAVRA + r"(?:\s+(?:d[aeo]s?\s+|e\s+)?" + _PALAVRA + r"){1,3})"
+_SEP = r"[\s\-–—|,:•·(]{1,8}"   # o que separa nome e cargo na página (traço, barra, vírgula, quebra de bloco)
+_NOME_CARGO_RE = re.compile(_NOME + _SEP + r"(" + _CARGO + r")\b")
+_CARGO_NOME_RE = re.compile(r"\b(" + _CARGO + r")" + _SEP + _NOME)
+_DR_RE = re.compile(r"\b(Dra?\.)\s+(" + _PALAVRA + r"(?:\s+(?:d[aeo]s?\s+)?" + _PALAVRA + r"){1,3})")
+_NAO_NOME = {"rua", "avenida", "av", "nossa", "nosso", "equipe", "conheça", "conheca", "sobre", "quem", "somos", "fale",
+             "contato", "home", "início", "inicio", "serviços", "servicos", "clínica", "clinica", "escritório", "escritorio",
+             "empresa", "política", "politica", "termos", "todos", "direitos", "reservados", "copyright", "atendimento",
+             "horário", "horario", "segunda", "sexta", "sábado", "sabado", "domingo", "whatsapp", "instagram", "facebook",
+             "linkedin", "agende", "agendar", "consulta", "saiba", "mais", "ver", "leia", "nosso", "time", "brasil"}
+
+
+def _texto(html):
+    t = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", html or "")
+    t = re.sub(r"(?s)<[^>]+>", " | ", t)
+    import html as _h
+    t = re.sub(r"\s+", " ", _h.unescape(t))
+    return re.sub(r"(?:\s*\|\s*)+", " | ", t)
+
+
+def _nome_ok(nome, empresa_tokens):
+    pal = [p for p in re.split(r"\s+", nome.strip()) if p]
+    if not 2 <= len([p for p in pal if p.lower() not in ("da", "de", "do", "das", "dos", "e", "dr.", "dra.", "dr", "dra")]) <= 4:
+        return False
+    if any(p.lower().strip(".") in _NAO_NOME for p in pal):
+        return False
+    low = {_fold_simples(p) for p in pal}
+    return not (empresa_tokens and low <= empresa_tokens)   # o nome da empresa não é uma pessoa
+
+
+def _fold_simples(s):
+    return unicodedata.normalize("NFKD", s.lower()).encode("ascii", "ignore").decode()
+
+
+def _cargo_bonito(c):
+    c = re.sub(r"\s+", " ", c.strip()).lower()
+    return "CEO" if c.replace(".", "") == "ceo" else c[:1].upper() + c[1:]
+
+
+def pessoas_do_site(html, empresa=""):
+    """Nomes com cargo de decisão (sócio, fundador, CEO, diretor, Dr./Dra.) citados nas páginas."""
+    texto = _texto(html)
+    emp = {_fold_simples(t) for t in re.findall(r"\w{3,}", empresa or "")}
+    vistos, out = set(), []
+
+    def add(nome, cargo):
+        nome = re.sub(r"\s+", " ", nome).strip(" ,.-|")
+        chave = _fold_simples(re.sub(r"^dra?\.?\s+", "", nome, flags=re.I))
+        if chave in vistos or not _nome_ok(nome, emp):
+            return
+        vistos.add(chave)
+        out.append({"nome": nome, "cargo": _cargo_bonito(cargo), "linkedin": "", "fonte": "site"})
+
+    for m in _NOME_CARGO_RE.finditer(texto):
+        add(m.group(1), m.group(2))
+    for m in _CARGO_NOME_RE.finditer(texto):
+        add(m.group(2), m.group(1))
+    if not out:   # clínicas: o(a) responsável costuma aparecer só como "Dr./Dra. Fulano"
+        for m in _DR_RE.finditer(texto):
+            add(m.group(1) + " " + m.group(2), "Responsável" )
+            if len(out) >= 2:
+                break
+    return out[:4]
+
+
+def _nome_do_slug(link):
+    slug = urllib.parse.unquote(link.rstrip("/").rsplit("/", 1)[-1])
+    partes = [p for p in re.split(r"[-_]+", slug) if p and not re.search(r"\d", p) and len(p) > 1]
+    return " ".join(p.capitalize() for p in partes[:4]) if len(partes) >= 2 else ""
+
+
+_PAG_EXTRA_RE = re.compile(r"contat|contact|about|sobre|quem-somos|quem_somos|quemsomos|equipe|nossa-equipe|time|team|"
+                           r"socios|sócios|profissionais|corpo-clinico|especialistas|institucional|empresa|fale", re.I)
+
+
+def paginas_extras(html, base_url, maximo=4):
+    """Até 4 páginas do mesmo site com contato, sobre ou equipe (onde aparecem e-mail e sócios)."""
+    if not base_url.startswith(("http://", "https://")):
+        base_url = "http://" + base_url
+    host, out = scrape._host(base_url), []
+    for href, txt in scrape.HREF_RE.findall(html or ""):
+        if not _PAG_EXTRA_RE.search(href + " " + txt):
+            continue
+        url = urllib.parse.urldefrag(urllib.parse.urljoin(base_url, href.strip()))[0]
+        if url.startswith(("http://", "https://")) and scrape._host(url) == host and url not in out and url.rstrip("/") != base_url.rstrip("/"):
+            out.append(url)
+    for path in ("/contato", "/sobre", "/quem-somos", "/equipe"):
+        url = urllib.parse.urljoin(base_url, path)
+        if len(out) < maximo and url not in out:
+            out.append(url)
+    return out[:maximo]
+
+
+def enrich_site(site, empresa=""):
+    """Visita a página inicial e até 4 páginas de contato/sobre/equipe. -> redes limpas, WhatsApp,
+    e-mails (até 3) e pessoas que decidem (nome, cargo, LinkedIn pessoal)."""
+    home = scrape._fetch_cached(site)
+    if not home:
+        return {"instagram": "", "facebook": "", "linkedin": "", "whatsapp": "", "emails": [], "pessoas": []}
+    extras = "".join(safe_fetch_html(u, timeout=8) for u in paginas_extras(home, site))
+    tudo = home + "\n" + extras
+    redes = redes_da_pagina(tudo)
+    pessoas = pessoas_do_site(tudo, empresa)
+    # perfis pessoais do LinkedIn citados no site: casa com um nome já achado, senão vira pessoa nova
+    for link in redes.pop("linkedin_pessoas"):
+        nome = _nome_do_slug(link)
+        par = next((p for p in pessoas if not p["linkedin"] and nome and _fold_simples(nome.split()[0]) in _fold_simples(p["nome"])), None)
+        if par:
+            par["linkedin"] = link
+        elif len(pessoas) < 4:
+            pessoas.append({"nome": nome, "cargo": "", "linkedin": link, "fonte": "site"})
+    return {**redes, "whatsapp": find_whatsapp(tudo), "emails": scrape.extract_emails(tudo, site), "pessoas": pessoas}
 
 
 # ── Cleaning ─────────────────────────────────────────────────────────────────
@@ -154,7 +328,11 @@ def clean_site(raw):
         return "", extras
     for key, hosts in _SOCIAL_HOSTS.items():
         if any(host == h or host.endswith("." + h) for h in hosts):
-            extras[key] = url
+            tipo, link = normalizar_rede(url)
+            if tipo in ("instagram", "facebook", "linkedin"):
+                extras[tipo] = link
+            elif tipo == "linkedin_pessoa":
+                extras["linkedin_pessoa"] = link
             return "", extras
     query = [(k, v) for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True)
              if not k.lower().startswith(("utm_", "gclid", "fbclid"))]
@@ -335,6 +513,9 @@ def clean_rows(rows, keywords):
             "instagram": extras.get("instagram", ""),
             "facebook": extras.get("facebook", ""),
             "linkedin": extras.get("linkedin", ""),
+            "emails": [],
+            "decisores": ([{"nome": _nome_do_slug(extras["linkedin_pessoa"]), "cargo": "", "linkedin": extras["linkedin_pessoa"], "fonte": "google_maps"}]
+                          if extras.get("linkedin_pessoa") else []),
             "endereco": clean_address(r.get("address"), r.get("title")),
             "bairro": ((_json_field(r, "complete_address") or {}).get("borough") or "").strip(),
             "cep": ((_json_field(r, "complete_address") or {}).get("postal_code") or "").strip(),
@@ -389,8 +570,165 @@ def apply_enrichment(leads, found):
         for k in ("instagram", "facebook", "linkedin"):
             if x.get(k) and not lead[k]:
                 lead[k] = x[k]
+        if x.get("emails") and not lead.get("emails"):
+            lead["emails"] = x["emails"]
+        for p in x.get("pessoas") or []:
+            if len(lead.setdefault("decisores", [])) < 4 and not any(_fold_simples(d["nome"]) == _fold_simples(p["nome"]) for d in lead["decisores"]):
+                lead["decisores"].append(p)
         if x.get("whatsapp") and not lead["whatsapp"]:
             lead["whatsapp"], lead["whatsapp_origem"] = "https://wa.me/" + x["whatsapp"], "site"
+
+
+# ── Busca no Google (Serper) para o que o site não tinha ─────────────────────
+# Só com login do Prospecta+ (nunca no modo sem login), com cache em disco (a mesma busca não paga de novo)
+# e teto por dia. Acha: Instagram, página da empresa no LinkedIn e quem decide (perfis /in/ com cargo).
+SERPER_KEY = os.environ.get("SERPER_API_KEY", "")
+SERPER_LIMITE_DIA = int(os.environ.get("SERPER_LIMITE_DIA", "800"))
+SERPER_LIMITE_USUARIO = int(os.environ.get("SERPER_LIMITE_USUARIO_DIA", "300"))
+MAX_LEADS_GOOGLE = 30
+_serper_lock = threading.Lock()
+_serper_uso = {"dia": "", "total": 0, "por": {}}
+_STOP_EMPRESA = {"de", "da", "do", "das", "dos", "e", "a", "o", "ltda", "me", "eireli", "epp", "sa", "s/a", "cia", "the",
+                 "clinica", "consultorio", "escritorio", "loja", "centro", "studio", "estudio", "grupo", "empresa", "servicos"}
+_CARGO_TXT = re.compile(_CARGO)
+
+
+def _tokens_empresa(nome):
+    return [t for t in re.findall(r"[a-z0-9]{3,}", _fold_simples(nome or "")) if t not in _STOP_EMPRESA]
+
+
+def _parece_empresa(texto, nome):
+    """O resultado fala desta empresa? Todas as palavras do nome (até 2) ou 2/3 delas aparecem."""
+    toks = _tokens_empresa(nome)
+    if not toks:
+        return False
+    t = _fold_simples(texto)
+    achou = sum(1 for k in toks if k in t)
+    precisa = len(toks) if len(toks) <= 2 else -(-len(toks) * 2 // 3)   # nomes curtos: todas; longos: 2/3
+    return achou >= precisa
+
+
+def _serper_cache_path(q):
+    return os.path.join(CACHE_DIR, "serper", hashlib.sha256(q.encode()).hexdigest()[:32] + ".json")
+
+
+def serper_buscar(q, quem):
+    """-> lista de resultados orgânicos [{title, link, snippet}]; cache de 30 dias; respeita os tetos."""
+    path = _serper_cache_path(q)
+    try:
+        if os.path.exists(path) and time.time() - os.path.getmtime(path) < 30 * 86400:
+            with open(path) as f:
+                return json.load(f)
+    except (OSError, ValueError):
+        pass
+    hoje = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with _serper_lock:
+        if _serper_uso["dia"] != hoje:
+            _serper_uso.update(dia=hoje, total=0, por={})
+        if _serper_uso["total"] >= SERPER_LIMITE_DIA or _serper_uso["por"].get(quem, 0) >= SERPER_LIMITE_USUARIO:
+            raise EngineError(429, "limite diário de buscas no Google atingido; tenta de novo amanhã")
+        _serper_uso["total"] += 1
+        _serper_uso["por"][quem] = _serper_uso["por"].get(quem, 0) + 1
+    req = urllib.request.Request("https://google.serper.dev/search", method="POST",
+                                 data=json.dumps({"q": q, "gl": "br", "hl": "pt-br", "num": 10}).encode(),
+                                 headers={"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            res = [{"title": x.get("title", ""), "link": x.get("link", ""), "snippet": x.get("snippet", "")}
+                   for x in (json.loads(r.read()).get("organic") or [])]
+    except (urllib.error.URLError, ValueError) as e:
+        raise EngineError(502, f"busca no Google falhou: {e}")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(res, f)
+    except OSError:
+        pass
+    return res
+
+
+def _decisor_do_titulo(r, empresa):
+    """'João Silva - Sócio - Contábil Alfa | LinkedIn' -> {nome, cargo}; só se for desta empresa."""
+    tipo, link = normalizar_rede(r["link"])
+    if tipo != "linkedin_pessoa":
+        return None
+    titulo = re.sub(r"\s*[|–-]\s*LinkedIn.*$", "", r["title"], flags=re.I).strip()
+    partes = [p.strip() for p in re.split(r"\s+[-–|]\s+", titulo) if p.strip()]
+    if not partes or not _parece_empresa(r["title"] + " " + r["snippet"], empresa):
+        return None
+    nome = re.sub(r"\s*\(.*?\)\s*", " ", partes[0]).strip()
+    if not _nome_ok(nome, set(_tokens_empresa(empresa))):
+        return None
+    cargo = ""
+    for p in partes[1:] + [r["snippet"]]:
+        m = _CARGO_TXT.search(p)
+        if m:
+            cargo = _cargo_bonito(m.group(0))
+            break
+    if not cargo:
+        return None   # sem cargo de decisão, é funcionário: não serve
+    return {"nome": nome, "cargo": cargo, "linkedin": link, "fonte": "google"}
+
+
+def redes_pelo_google(lead, faltam, quem):
+    """Procura no Google o que faltou para um lead. faltam: instagram, linkedin, decisor."""
+    nome, cidade = (lead.get("nome") or "").strip(), (lead.get("cidade") or "").strip()
+    out = {}
+    if not nome or not _tokens_empresa(nome):
+        return out
+    if "instagram" in faltam:
+        for r in serper_buscar(f'site:instagram.com "{nome}" {cidade}'.strip(), quem):
+            tipo, link = normalizar_rede(r["link"])
+            handle = link.rstrip("/").rsplit("/", 1)[-1] if tipo == "instagram" else ""
+            if tipo == "instagram" and (_parece_empresa(r["title"] + " " + r["snippet"], nome) or _parece_empresa(handle, nome)):
+                out["instagram"] = link
+                break
+    if "linkedin" in faltam:
+        for r in serper_buscar(f'site:linkedin.com/company "{nome}"', quem):
+            tipo, link = normalizar_rede(r["link"])
+            if tipo == "linkedin" and _parece_empresa(r["title"] + " " + r["snippet"], nome):
+                out["linkedin"] = link
+                break
+    if "decisor" in faltam:
+        cargos = "(sócio OR sócia OR proprietário OR proprietária OR fundador OR fundadora OR CEO OR diretor OR diretora)"
+        pessoas = []
+        for r in serper_buscar(f'site:linkedin.com/in "{nome}" {cargos}', quem):
+            d = _decisor_do_titulo(r, nome)
+            if d and d["linkedin"] not in {p["linkedin"] for p in pessoas}:
+                pessoas.append(d)
+            if len(pessoas) >= 3:
+                break
+        out["decisores"] = pessoas
+    return out
+
+
+def buscar_redes_google(body, quem):
+    leads = body.get("leads")
+    if not SERPER_KEY:
+        raise EngineError(501, "busca no Google não configurada (SERPER_API_KEY)")
+    if not isinstance(leads, list) or not leads:
+        raise EngineError(400, "leads deve ser uma lista")
+    if len(leads) > MAX_LEADS_GOOGLE:
+        raise EngineError(400, f"no máximo {MAX_LEADS_GOOGLE} leads por chamada")
+    validos = {"instagram", "linkedin", "decisor"}
+    tarefas = []
+    for x in leads:
+        if not isinstance(x, dict):
+            continue
+        faltam = [f for f in (x.get("faltam") or []) if f in validos]
+        if faltam:
+            tarefas.append((str(x.get("id", ""))[:80], {"nome": str(x.get("nome", ""))[:120], "cidade": str(x.get("cidade", ""))[:80]}, faltam))
+
+    def um(t):
+        try:
+            return t[0], redes_pelo_google(t[1], t[2], quem)
+        except EngineError as e:
+            if e.code == 429:
+                return t[0], {"erro": str(e)}
+            return t[0], {}
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        res = dict(ex.map(um, tarefas))
+    return {"resultados": res, "uso_hoje": _serper_uso.get("total", 0)}
 
 
 # ── WhatsApp check through the Prospecta WhatsApp server ─────────────────────
@@ -699,6 +1037,7 @@ def start_background_enrich(job_id, leads, found, finished):
     if not finished:
         return "aguardando"
     sites = sorted({x["site"] for x in leads if x["site"]} - set((found or {}).keys()))
+    nome_do_site = {x["site"]: x["nome"] for x in leads if x["site"]}
     if not sites:
         return "pronto"
     with _enrich_jobs_lock:
@@ -710,7 +1049,7 @@ def start_background_enrich(job_id, leads, found, finished):
         try:
             def one(site):
                 try:
-                    return enrich_site(site)
+                    return enrich_site(site, nome_do_site.get(site, ""))
                 except Exception:
                     return {}   # cached as "nothing found", so the site is not retried every read
             with ThreadPoolExecutor(max_workers=8) as ex:
@@ -759,8 +1098,9 @@ def get_leads(job_id, q):
     if q.get("enriquecer") == "1" and leads:
         sites = sorted({lead["site"] for lead in leads if lead["site"]} - set((found or {}).keys()))
         if sites:
+            nome_do_site = {lead["site"]: lead["nome"] for lead in leads if lead["site"]}
             with ThreadPoolExecutor(max_workers=8) as ex:
-                found = {**(found or {}), **dict(zip(sites, ex.map(enrich_site, sites)))}
+                found = {**(found or {}), **dict(zip(sites, ex.map(lambda st: enrich_site(st, nome_do_site.get(st, "")), sites)))}
             if summary["status"] == "pronta":
                 save_cache(job_id, found)
     if found:
@@ -1130,6 +1470,10 @@ class Handler(BaseHTTPRequestHandler):
                 sys.stderr.write(f"api: chamada sem login (modo transicao): {method} {path}\n")
             if method == "POST" and path == "/enrich":
                 return self._enrich()
+            if method == "POST" and path == "/leads/redes-google":
+                if caller == "sem-login":   # custa por busca: nunca sem login, nem no modo transição
+                    return self._json(401, {"erro": "faça login no Prospecta+"})
+                return self._json(200, buscar_redes_google(self._body(), caller))
             if path == "/leads/buscas" and method == "GET":
                 return self._json(200, {"buscas": list_searches()})
             if path == "/leads/buscas" and method == "POST":
