@@ -12,7 +12,7 @@ Clean leads (for Prospecta, n8n or any other integration):
   DELETE /leads/buscas/{id}
 
 Google lookup (Serper) for what the business site did not have, login required, cached, capped per day:
-  POST   /leads/redes-google    {"leads": [{"id": "...", "nome": "...", "cidade": "...", "faltam": ["instagram","linkedin","decisor"]}]}
+  POST   /leads/redes-google    {"leads": [{"id": "...", "nome": "...", "cidade": "...", "telefone": "...", "site": "...", "faltam": ["instagram","linkedin","decisor"]}]}
 
 Socials lookup used by the page:
   POST   /enrich                {"sites": ["https://example.com", ...]}   (max 20 per request)
@@ -154,17 +154,52 @@ def normalizar_rede(url):
 _LINK_REDE_RE = re.compile(r"""https?:\\?/\\?/(?:[a-z]{2,3}\.|www\.|m\.|web\.)?(?:instagram\.com|facebook\.com|fb\.com|linkedin\.com)/[^\s"'<>()]+""", re.I)
 
 
-def redes_da_pagina(html):
+# "Desenvolvido por @agenciax": a rede logo depois disso é de quem fez o site, não da empresa
+_CREDITO_RE = re.compile(r"desenvolvid[oa]|cria[çc][ãa]o|criad[oa]s?\s+por|feito\s+por|produzid[oa]|powered\s+by|made\s+by"
+                         r"|design(?:ed)?\s+by|site\s+por|ag[êe]ncia|by\s*$", re.I)
+
+
+def _rotulo_site(site):
+    """'https://www.contabilalfa.com.br/x' -> 'contabilalfa'"""
+    host = scrape._host(site or "").lower()
+    host = host[4:] if host.startswith("www.") else host
+    return _fold_simples(host.split(".")[0]) if host else ""
+
+
+def _rede_da_empresa(link, empresa, site):
+    """O link tem o nome da empresa ou do domínio do site? (ex.: @contabil.alfa, /company/contabil-alfa)"""
+    slug = re.sub(r"[^a-z0-9]", "", _fold_simples(urllib.parse.unquote(link.rstrip("/").rsplit("/", 1)[-1])))
+    rot = re.sub(r"[^a-z0-9]", "", _rotulo_site(site))
+    if not slug:
+        return False
+    if rot and len(rot) >= 4 and (rot in slug or slug in rot):
+        return True
+    return any(t in slug for t in _tokens_empresa(empresa) if len(t) >= 4)
+
+
+def redes_da_pagina(html, empresa="", site=""):
     """Todas as redes da página, já limpas: a página da empresa no LinkedIn nunca é trocada pelo perfil de
-    uma pessoa; perfis pessoais (/in/) vão para a lista de pessoas."""
+    uma pessoa; perfis pessoais (/in/) vão para a lista de pessoas. Link de crédito da agência que fez
+    o site é ignorado; havendo vários, vence o que tem o nome da empresa."""
     out = {"instagram": "", "facebook": "", "linkedin": "", "linkedin_pessoas": []}
-    for m in _LINK_REDE_RE.finditer(html or ""):
+    cands = {"instagram": [], "facebook": [], "linkedin": []}
+    html = html or ""
+    for m in _LINK_REDE_RE.finditer(html):
         tipo, link = normalizar_rede(m.group(0))
+        if not tipo:
+            continue
         if tipo == "linkedin_pessoa":
             if link not in out["linkedin_pessoas"]:
                 out["linkedin_pessoas"].append(link)
-        elif tipo and not out[tipo]:
-            out[tipo] = link
+            continue
+        antes = _texto(html[max(0, m.start() - 400):m.start()])[-90:]
+        if _CREDITO_RE.search(antes) and not _rede_da_empresa(link, empresa, site):
+            continue
+        cands[tipo].append(link)
+    for tipo, lista in cands.items():
+        if lista:
+            # nome da empresa no link > aparece mais vezes na página > o primeiro da página
+            out[tipo] = max(dict.fromkeys(lista), key=lambda l: (_rede_da_empresa(l, empresa, site), lista.count(l), -lista.index(l)))
     out["linkedin_pessoas"] = out["linkedin_pessoas"][:5]
     return out
 
@@ -184,6 +219,10 @@ _NAO_NOME = {"rua", "avenida", "av", "nossa", "nosso", "equipe", "conheça", "co
              "empresa", "política", "politica", "termos", "todos", "direitos", "reservados", "copyright", "atendimento",
              "horário", "horario", "segunda", "sexta", "sábado", "sabado", "domingo", "whatsapp", "instagram", "facebook",
              "linkedin", "agende", "agendar", "consulta", "saiba", "mais", "ver", "leia", "nosso", "time", "brasil"}
+
+
+_DEPOIMENTO_RE = re.compile(r"depoiment|o que (?:nossos |os )?clientes|clientes (?:dizem|falam)|testemunh|feedback|quem confia|"
+                            r"cases? de sucesso|parceiros|avalia[çc][õo]es", re.I)
 
 
 def _texto(html):
@@ -219,7 +258,19 @@ def pessoas_do_site(html, empresa=""):
     emp = {_fold_simples(t) for t in re.findall(r"\w{3,}", empresa or "")}
     vistos, out = set(), []
 
-    def add(nome, cargo):
+    def de_outra_empresa(m):
+        """Depoimento de cliente ('O que dizem nossos clientes') ou 'Diretor da Empresa Y' (Y não é esta)."""
+        if _DEPOIMENTO_RE.search(texto[max(0, m.start() - 300):m.start()]):
+            return True
+        depois = re.match(r"\s*(?:d[aeo]s?|n[ao]s?|em|at|@)\s+((?:[A-ZÁÉÍÓÚÂÊÔÃÕÇ0-9][\w&.'-]*\s*){1,4})", texto[m.end():m.end() + 60])
+        if depois:
+            outra = {_fold_simples(t) for t in re.findall(r"\w{3,}", depois.group(1))}
+            return bool(outra) and not (outra & emp)
+        return False
+
+    def add(nome, cargo, m=None):
+        if m is not None and de_outra_empresa(m):
+            return
         nome = re.sub(r"\s+", " ", nome).strip(" ,.-|")
         chave = _fold_simples(re.sub(r"^dra?\.?\s+", "", nome, flags=re.I))
         if chave in vistos or not _nome_ok(nome, emp):
@@ -228,9 +279,9 @@ def pessoas_do_site(html, empresa=""):
         out.append({"nome": nome, "cargo": _cargo_bonito(cargo), "linkedin": "", "fonte": "site"})
 
     for m in _NOME_CARGO_RE.finditer(texto):
-        add(m.group(1), m.group(2))
+        add(m.group(1), m.group(2), m)
     for m in _CARGO_NOME_RE.finditer(texto):
-        add(m.group(2), m.group(1))
+        add(m.group(2), m.group(1), m)
     if not out:   # clínicas: o(a) responsável costuma aparecer só como "Dr./Dra. Fulano"
         for m in _DR_RE.finditer(texto):
             add(m.group(1) + " " + m.group(2), "Responsável" )
@@ -275,7 +326,7 @@ def enrich_site(site, empresa=""):
         return {"instagram": "", "facebook": "", "linkedin": "", "whatsapp": "", "emails": [], "pessoas": []}
     extras = "".join(safe_fetch_html(u, timeout=8) for u in paginas_extras(home, site))
     tudo = home + "\n" + extras
-    redes = redes_da_pagina(tudo)
+    redes = redes_da_pagina(tudo, empresa, site)
     pessoas = pessoas_do_site(tudo, empresa)
     # perfis pessoais do LinkedIn citados no site: casa com um nome já achado, senão vira pessoa nova
     for link in redes.pop("linkedin_pessoas"):
@@ -285,7 +336,23 @@ def enrich_site(site, empresa=""):
             par["linkedin"] = link
         elif len(pessoas) < 4:
             pessoas.append({"nome": nome, "cargo": "", "linkedin": link, "fonte": "site"})
-    return {**redes, "whatsapp": find_whatsapp(tudo), "emails": scrape.extract_emails(tudo, site), "pessoas": pessoas}
+    return {**redes, "whatsapp": find_whatsapp(tudo), "emails": emails_da_empresa(scrape.extract_emails(tudo, site), site), "pessoas": pessoas}
+
+
+_EMAIL_LIVRE = {"gmail.com", "hotmail.com", "hotmail.com.br", "outlook.com", "outlook.com.br", "live.com", "msn.com", "yahoo.com",
+                "yahoo.com.br", "icloud.com", "uol.com.br", "bol.com.br", "terra.com.br", "ig.com.br", "globo.com", "globomail.com"}
+
+
+def emails_da_empresa(emails, site):
+    """Fica o e-mail do próprio domínio do site ou de provedor comum (gmail, hotmail…); e-mail de outro
+    domínio no site costuma ser da agência que fez o site ou de um parceiro."""
+    rot = _rotulo_site(site)
+    out = []
+    for e in emails or []:
+        dom = e.rsplit("@", 1)[-1].lower()
+        if dom in _EMAIL_LIVRE or (rot and _fold_simples(dom.split(".")[0]) == rot):
+            out.append(e)
+    return out
 
 
 # ── Cleaning ─────────────────────────────────────────────────────────────────
@@ -647,15 +714,38 @@ def serper_buscar(q, quem):
     return res
 
 
-def _decisor_do_titulo(r, empresa):
+def _provas(texto, lead):
+    """-> (forte, cidade): o telefone ou o site da empresa aparecem (forte)? a cidade aparece?"""
+    t, dig = _fold_simples(texto), re.sub(r"\D", "", texto)
+    tel = re.sub(r"\D", "", lead.get("telefone") or "")[-8:]
+    rot = _rotulo_site(lead.get("site"))
+    forte = (len(tel) == 8 and tel in dig) or (len(rot) >= 5 and rot in re.sub(r"[^a-z0-9]", "", t))
+    cid = _fold_simples(lead.get("cidade") or "").strip()
+    return forte, bool(cid) and cid in t
+
+
+def _e_desta_empresa(texto, lead):
+    """Nome da empresa no resultado E mais uma prova (cidade, telefone ou site). Só o nome não basta:
+    'Pet Feliz' existe em toda cidade."""
+    if not _parece_empresa(texto, lead.get("nome") or ""):
+        return False
+    forte, cidade = _provas(texto, lead)
+    return forte or cidade
+
+
+def _decisor_do_titulo(r, lead):
     """'João Silva - Sócio - Contábil Alfa | LinkedIn' -> {nome, cargo}; só se for desta empresa."""
+    empresa = lead.get("nome") or ""
     tipo, link = normalizar_rede(r["link"])
     if tipo != "linkedin_pessoa":
         return None
     titulo = re.sub(r"\s*[|–-]\s*LinkedIn.*$", "", r["title"], flags=re.I).strip()
     partes = [p.strip() for p in re.split(r"\s+[-–|]\s+", titulo) if p.strip()]
-    if not partes or not _parece_empresa(r["title"] + " " + r["snippet"], empresa):
+    # a empresa tem de estar no título (o emprego atual), não só no resumo (pode ser emprego antigo)
+    if len(partes) < 2 or not _parece_empresa(" ".join(partes[1:]), empresa):
         return None
+    if len(_tokens_empresa(empresa)) <= 2 and not any(_provas(r["title"] + " " + r["snippet"], lead)):
+        return None   # nome curto/comum: precisa da cidade, do telefone ou do site também
     nome = re.sub(r"\s*\(.*?\)\s*", " ", partes[0]).strip()
     if not _nome_ok(nome, set(_tokens_empresa(empresa))):
         return None
@@ -676,24 +766,26 @@ def redes_pelo_google(lead, faltam, quem):
     out = {}
     if not nome or not _tokens_empresa(nome):
         return out
+    if not (cidade or lead.get("telefone") or lead.get("site")):
+        return out   # sem como conferir que é a mesma empresa: melhor não achar nada do que achar errado
     if "instagram" in faltam:
         for r in serper_buscar(f'site:instagram.com "{nome}" {cidade}'.strip(), quem):
             tipo, link = normalizar_rede(r["link"])
             handle = link.rstrip("/").rsplit("/", 1)[-1] if tipo == "instagram" else ""
-            if tipo == "instagram" and (_parece_empresa(r["title"] + " " + r["snippet"], nome) or _parece_empresa(handle, nome)):
+            if tipo == "instagram" and _e_desta_empresa(r["title"] + " " + r["snippet"] + " " + handle, lead):
                 out["instagram"] = link
                 break
     if "linkedin" in faltam:
-        for r in serper_buscar(f'site:linkedin.com/company "{nome}"', quem):
+        for r in serper_buscar(f'site:linkedin.com/company "{nome}" {cidade}'.strip(), quem):
             tipo, link = normalizar_rede(r["link"])
-            if tipo == "linkedin" and _parece_empresa(r["title"] + " " + r["snippet"], nome):
+            if tipo == "linkedin" and _e_desta_empresa(r["title"] + " " + r["snippet"], lead):
                 out["linkedin"] = link
                 break
     if "decisor" in faltam:
         cargos = "(sócio OR sócia OR proprietário OR proprietária OR fundador OR fundadora OR CEO OR diretor OR diretora)"
         pessoas = []
-        for r in serper_buscar(f'site:linkedin.com/in "{nome}" {cargos}', quem):
-            d = _decisor_do_titulo(r, nome)
+        for r in serper_buscar(f'site:linkedin.com/in "{nome}" {cargos} {cidade}'.strip(), quem):
+            d = _decisor_do_titulo(r, lead)
             if d and d["linkedin"] not in {p["linkedin"] for p in pessoas}:
                 pessoas.append(d)
             if len(pessoas) >= 3:
@@ -717,7 +809,8 @@ def buscar_redes_google(body, quem):
             continue
         faltam = [f for f in (x.get("faltam") or []) if f in validos]
         if faltam:
-            tarefas.append((str(x.get("id", ""))[:80], {"nome": str(x.get("nome", ""))[:120], "cidade": str(x.get("cidade", ""))[:80]}, faltam))
+            tarefas.append((str(x.get("id", ""))[:80], {"nome": str(x.get("nome", ""))[:120], "cidade": str(x.get("cidade", ""))[:80],
+                                                       "telefone": str(x.get("telefone", ""))[:30], "site": str(x.get("site", ""))[:200]}, faltam))
 
     def um(t):
         try:
