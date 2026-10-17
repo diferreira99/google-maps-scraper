@@ -15,7 +15,7 @@ Google lookup (Serper) for what the business site did not have, login required, 
   POST   /leads/redes-google    {"leads": [{"id": "...", "nome": "...", "cidade": "...", "telefone": "...", "site": "...", "faltam": ["instagram","linkedin","decisor"]}]}
 
 Socials lookup used by the page:
-  POST   /enrich                {"sites": ["https://example.com", ...]}   (max 20 per request)
+  POST   /enrich                {"sites": ["https://example.com", ...] or [{"site": "...", "nome": "..."}]}   (max 20 per request)
 
 Every endpoint is reachable from the public URL with no auth, so site visits only go to public
 http(s) hosts: every hop (including redirects) must resolve to a public IP, and only the extracted
@@ -1621,14 +1621,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _enrich(self):
-        sites = self._body().get("sites")
-        if not isinstance(sites, list) or not all(isinstance(s, str) for s in sites):
-            raise EngineError(400, "sites must be a list of URLs")
-        sites = list(dict.fromkeys(s.strip() for s in sites if s.strip()))
-        if len(sites) > MAX_SITES:
+        # "sites": ["https://...", ...] ou [{"site": "https://...", "nome": "Empresa"}, ...]
+        # (com o nome, entre várias redes no site vence a que tem o nome da empresa)
+        itens = self._body().get("sites")
+        if not isinstance(itens, list):
+            raise EngineError(400, "sites must be a list")
+        pares = {}
+        for it in itens:
+            if isinstance(it, str):
+                site, nome = it.strip(), ""
+            elif isinstance(it, dict) and isinstance(it.get("site"), str):
+                site, nome = it["site"].strip(), str(it.get("nome") or "")[:120]
+            else:
+                raise EngineError(400, "sites must be URLs or {site, nome}")
+            if site and site not in pares:
+                pares[site] = nome
+        if len(pares) > MAX_SITES:
             raise EngineError(400, f"at most {MAX_SITES} sites per request")
         with ThreadPoolExecutor(max_workers=8) as ex:
-            results = dict(zip(sites, ex.map(enrich_site, sites)))
+            results = dict(zip(pares, ex.map(lambda kv: enrich_site(kv[0], kv[1]), pares.items())))
         self._json(200, {"results": results})
 
     def log_message(self, fmt, *args):
