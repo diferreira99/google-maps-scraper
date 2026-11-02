@@ -15,6 +15,7 @@ Google lookup (Serper) for what the business site did not have, login required, 
   POST   /leads/redes-google    {"leads": [{"id": "...", "nome": "...", "cidade": "...", "telefone": "...", "site": "...", "faltam": ["instagram","linkedin","decisor"]}]}
 
 Socials lookup used by the page:
+  POST   /leads/decisor-perfil {"pessoa": "Maria da Silva", "empresa": "...", "cidade": "..."} -> {"linkedin": url | null, "cargo": ...}
   POST   /leads/cnpj-google {"nome": "...", "cidade": "..."} -> {"cnpj": "14 dígitos" | null, "fonte": link}
   POST   /enrich                {"sites": ["https://example.com", ...] or [{"site": "...", "nome": "..."}]}   (max 20 per request)
 
@@ -800,6 +801,9 @@ def redes_pelo_google(lead, faltam, quem):
                 break
     if "decisor" in faltam:
         cargos = "(sócio OR sócia OR proprietário OR proprietária OR fundador OR fundadora OR CEO OR diretor OR diretora)"
+        extra = [c for c in (lead.get("cargos") or []) if isinstance(c, str) and re.fullmatch(r"[\w\sà-úÀ-Ú]{3,40}", c)][:6]
+        if extra:   # quem compra o produto (ex.: diretor comercial, gerente de marketing), além do dono
+            cargos = "(" + " OR ".join(['"' + c.strip() + '"' for c in extra] + ["sócio", "sócia", "proprietário", "CEO"]) + ")"
         pessoas = []
         for r in serper_buscar(f'site:linkedin.com/in "{nome}" {cargos} {cidade}'.strip(), quem):
             d = _decisor_do_titulo(r, lead)
@@ -852,6 +856,46 @@ def buscar_cnpj_google(body, quem):
     return {"cnpj": melhor[0], "fonte": melhor[2]} if melhor else {"cnpj": None}
 
 
+def perfil_da_pessoa(body, quem):
+    """Perfil do LinkedIn de uma pessoa que já sabemos o nome (ex.: o sócio da Receita).
+    Só aceita se o título tem o nome dela (primeiro nome + mais um) e há prova da empresa ou da cidade."""
+    pessoa = str(body.get("pessoa") or "").strip()[:80]
+    empresa = str(body.get("empresa") or "").strip()[:120]
+    cidade = str(body.get("cidade") or "").strip()[:80]
+    if not SERPER_KEY:
+        raise EngineError(501, "busca no Google não configurada (SERPER_API_KEY)")
+    sem = lambda t: unicodedata.normalize("NFD", (t or "").lower()).encode("ascii", "ignore").decode()
+    nomes = [t for t in re.findall(r"[a-z]+", sem(pessoa)) if len(t) > 2 and t not in {"da", "de", "do", "das", "dos"}]
+    if len(nomes) < 2:
+        raise EngineError(400, "informe nome e sobrenome da pessoa")
+    toks_emp = [t for t in re.findall(r"[a-z0-9]+", sem(empresa)) if len(t) > 2 and t not in _CNPJ_PALAVRAS_FRACAS]
+    for q, exige_empresa in ((f'site:linkedin.com/in "{pessoa}" "{empresa}"', True), (f'site:linkedin.com/in "{pessoa}" {cidade}', False)):
+        if not q.strip() or (exige_empresa and not empresa):
+            continue
+        for r in serper_buscar(q.strip(), quem):
+            tipo, link = normalizar_rede(r.get("link", ""))
+            if tipo != "linkedin_pessoa":
+                continue
+            titulo = re.sub(r"\s*[|–-]\s*LinkedIn.*$", "", r.get("title", ""), flags=re.I).strip()
+            cab = sem(re.split(r"\s+[-–|]\s+", titulo)[0]) if titulo else ""
+            if nomes[0] not in cab or not any(n in cab for n in nomes[1:]):
+                continue
+            tudo = sem(r.get("title", "") + " " + r.get("snippet", ""))
+            prova_emp = toks_emp and sum(1 for t in toks_emp if t in tudo) >= (1 if len(toks_emp) == 1 else 2)
+            prova_cid = cidade and sem(cidade).split(",")[0].strip() in tudo
+            if not (prova_emp or (not exige_empresa and prova_cid)):
+                continue
+            partes = [p.strip() for p in re.split(r"\s+[-–|]\s+", titulo) if p.strip()]
+            cargo = ""
+            for p in partes[1:] + [r.get("snippet", "")]:
+                m = _CARGO_TXT.search(p)
+                if m:
+                    cargo = _cargo_bonito(m.group(0))
+                    break
+            return {"linkedin": link, "titulo": titulo[:160], "cargo": cargo, "confere_empresa": bool(prova_emp)}
+    return {"linkedin": None}
+
+
 def buscar_redes_google(body, quem):
     leads = body.get("leads")
     if not SERPER_KEY:
@@ -868,7 +912,8 @@ def buscar_redes_google(body, quem):
         faltam = [f for f in (x.get("faltam") or []) if f in validos]
         if faltam:
             tarefas.append((str(x.get("id", ""))[:80], {"nome": str(x.get("nome", ""))[:120], "cidade": str(x.get("cidade", ""))[:80],
-                                                       "telefone": str(x.get("telefone", ""))[:30], "site": str(x.get("site", ""))[:200]}, faltam))
+                                                       "telefone": str(x.get("telefone", ""))[:30], "site": str(x.get("site", ""))[:200],
+                                                       "cargos": [str(c)[:40] for c in (x.get("cargos") or [])][:6] if isinstance(x.get("cargos"), list) else []}, faltam))
 
     def um(t):
         try:
@@ -1625,6 +1670,10 @@ class Handler(BaseHTTPRequestHandler):
                 if caller == "sem-login":   # custa por busca: nunca sem login, nem no modo transição
                     return self._json(401, {"erro": "faça login no Prospecta+"})
                 return self._json(200, buscar_redes_google(self._body(), caller))
+            if method == "POST" and path == "/leads/decisor-perfil":
+                if caller == "sem-login":
+                    return self._json(401, {"erro": "faça login no Prospecta+"})
+                return self._json(200, perfil_da_pessoa(self._body(), caller))
             if method == "POST" and path == "/leads/cnpj-google":
                 if caller == "sem-login":   # custa por busca: nunca sem login
                     return self._json(401, {"erro": "faça login no Prospecta+"})
