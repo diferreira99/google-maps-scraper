@@ -17,6 +17,9 @@ Google lookup (Serper) for what the business site did not have, login required, 
 Socials lookup used by the page:
   POST   /leads/decisor-perfil {"pessoa": "Maria da Silva", "empresa": "...", "cidade": "..."} -> {"linkedin": url | null, "cargo": ...}
   POST   /leads/cnpj-google {"nome": "...", "cidade": "..."} -> {"cnpj": "14 dígitos" | null, "fonte": link}
+  POST   /leads/linkedin-pessoas {"setor": "...", "cidade": "...", "cargos": [...], "paginas": 1-3} -> {"pessoas": [{nome, cargo, empresa, linkedin, local}]}
+  POST   /leads/vagas {"nome": "..."} -> {"vagas": [{titulo, link}]}   (sinal de compra: empresa contratando)
+  POST   /leads/instagram-info {"handle": "..."} -> {"seguidores", "posts", "bio"}   (o que o Google mostra do perfil)
   POST   /enrich                {"sites": ["https://example.com", ...] or [{"site": "...", "nome": "..."}]}   (max 20 per request)
 
 Every endpoint is reachable from the public URL with no auth, so site visits only go to public
@@ -681,9 +684,10 @@ def _serper_cache_path(q):
     return os.path.join(CACHE_DIR, "serper", hashlib.sha256(q.encode()).hexdigest()[:32] + ".json")
 
 
-def serper_buscar(q, quem):
+def serper_buscar(q, quem, pagina=1):
     """-> lista de resultados orgânicos [{title, link, snippet}]; cache de 30 dias; respeita os tetos."""
-    path = _serper_cache_path(q)
+    pagina = max(1, min(int(pagina or 1), 5))
+    path = _serper_cache_path(q if pagina == 1 else f"{q}#p{pagina}")
     try:
         if os.path.exists(path) and time.time() - os.path.getmtime(path) < 30 * 86400:
             with open(path) as f:
@@ -699,7 +703,7 @@ def serper_buscar(q, quem):
         _serper_uso["total"] += 1
         _serper_uso["por"][quem] = _serper_uso["por"].get(quem, 0) + 1
     req = urllib.request.Request("https://google.serper.dev/search", method="POST",
-                                 data=json.dumps({"q": q, "gl": "br", "hl": "pt-br", "num": 10}).encode(),
+                                 data=json.dumps(dict({"q": q, "gl": "br", "hl": "pt-br", "num": 10}, **({"page": pagina} if pagina > 1 else {}))).encode(),
                                  headers={"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
@@ -789,6 +793,11 @@ def redes_pelo_google(lead, faltam, quem):
             handle = link.rstrip("/").rsplit("/", 1)[-1] if tipo == "instagram" else ""
             if tipo == "instagram" and _e_desta_empresa(r["title"] + " " + r["snippet"] + " " + handle, lead):
                 out["instagram"] = link
+                nums = ig_numeros(r["snippet"] + " " + r["title"])
+                if nums.get("seguidores") is not None:
+                    out["instagram_seguidores"] = nums["seguidores"]
+                if nums.get("posts") is not None:
+                    out["instagram_posts"] = nums["posts"]
                 bio = bio_instagram(r)
                 if bio:
                     out["instagram_bio"] = bio
@@ -813,6 +822,143 @@ def redes_pelo_google(lead, faltam, quem):
                 break
         out["decisores"] = pessoas
     return out
+
+
+def ig_numeros(snippet):
+    """'1.234 seguidores, 56 seguindo, 78 publicações' (ou em inglês, com mil/k) -> {"seguidores": 1234, "posts": 78}"""
+    t = (snippet or "").lower()
+    def num(rot):
+        m = re.search(r"([\d.,]+)\s*(mil|k|mi|m)?\s*(?:" + rot + r")\b", t)
+        if not m:
+            return None
+        v, mult = m.group(1), m.group(2)
+        try:
+            if mult:
+                n = float(v.replace(",", ".")) * (1000000 if mult in ("mi", "m") else 1000)   # 2.5K, 12,5 mil
+            else:
+                n = float(v.replace(".", "").replace(",", ""))
+        except ValueError:
+            return None
+        return int(n)
+    out = {}
+    s_ = num("seguidores|followers")
+    p_ = num("publica[çc][õo]es|posts")
+    if s_ is not None:
+        out["seguidores"] = s_
+    if p_ is not None:
+        out["posts"] = p_
+    return out
+
+
+def instagram_info(body, quem):
+    """Números públicos do perfil (o que o Google mostra): seguidores, publicações e a bio. Não entra no Instagram."""
+    h = str(body.get("handle") or "").strip().lstrip("@").lower()[:30]
+    if not SERPER_KEY:
+        raise EngineError(501, "busca no Google não configurada (SERPER_API_KEY)")
+    if not re.fullmatch(r"[a-z0-9_.]{2,30}", h):
+        raise EngineError(400, "perfil inválido")
+    for r in serper_buscar(f"site:instagram.com/{h}", quem):
+        tipo, link = normalizar_rede(r.get("link", ""))
+        if tipo == "instagram" and link.rstrip("/").rsplit("/", 1)[-1] == h:
+            out = {"handle": h, **ig_numeros(r.get("snippet", "") + " " + r.get("title", ""))}
+            bio = bio_instagram(r)
+            if bio:
+                out["bio"] = bio
+            return out
+    return {"handle": h}
+
+
+_DECISAO_PADRAO = ["sócio", "sócia", "proprietário", "fundador", "CEO", "diretor"]
+
+
+def pessoas_linkedin_google(body, quem):
+    """Prospecção que começa no LinkedIn, pelo Google (não entra no LinkedIn): perfis de quem decide
+    num setor e cidade. 'site:linkedin.com/in ("sócio" OR "diretor") "indústria" "Guarulhos"'.
+    -> {"pessoas": [{nome, cargo, empresa, linkedin, local}], "uso_hoje": n}"""
+    if not SERPER_KEY:
+        raise EngineError(501, "busca no Google não configurada (SERPER_API_KEY)")
+    limpa = lambda v, n: re.sub(r'["()]', " ", str(v or "")).strip()[:n]
+    setor, cidade = limpa(body.get("setor"), 60), limpa(body.get("cidade"), 60)
+    cargos = [limpa(c, 40) for c in (body.get("cargos") or []) if isinstance(c, str) and re.fullmatch(r"[\w\sà-úÀ-Ú-]{3,40}", c.strip())][:6] or _DECISAO_PADRAO
+    paginas = max(1, min(int(body.get("paginas") or 2), 3))
+    if len(setor) < 3:
+        raise EngineError(400, "diga o setor (ex.: indústria de plástico, transportadora, clínica)")
+    q = "site:linkedin.com/in (" + " OR ".join('"' + c + '"' for c in cargos) + f') "{setor}"' + (f' "{cidade}"' if cidade else "")
+    vistos, pessoas = set(), []
+    cid = _fold_simples(cidade).split(",")[0].strip()
+    for pg in range(1, paginas + 1):
+        try:
+            res = serper_buscar(q, quem, pg)
+        except EngineError as e:
+            if e.code == 429 and pessoas:
+                break
+            raise
+        for r in res:
+            tipo, link = normalizar_rede(r.get("link", ""))
+            if tipo != "linkedin_pessoa" or link in vistos:
+                continue
+            titulo = re.sub(r"\s*[|–-]\s*LinkedIn.*$", "", r.get("title", ""), flags=re.I).strip()
+            partes = [x.strip() for x in re.split(r"\s+[-–|]\s+", titulo) if x.strip()]
+            if not partes:
+                continue
+            nome = re.sub(r"\s*\(.*?\)\s*", " ", partes[0]).strip()
+            if not re.fullmatch(r"[A-Za-zÀ-ÿ'.\s]{4,60}", nome) or len(nome.split()) < 2:
+                continue
+            snip = r.get("snippet", "")
+            cargo = ""
+            for x in partes[1:] + [snip]:
+                m = _CARGO_TXT.search(x) or next((re.search(re.escape(c), x, re.I) for c in cargos if re.search(re.escape(c), x, re.I)), None)
+                if m:
+                    cargo = _cargo_bonito(m.group(0))
+                    break
+            if not cargo:
+                continue   # sem cargo de decisão: não é quem compra
+            empresa = ""
+            m = re.search(r"(?:Experiência|Experience)\s*:\s*([^·|\n]{2,80})", snip)
+            if m:
+                empresa = m.group(1).strip(" .")
+            if not empresa:
+                for x in partes[1:]:
+                    if not _CARGO_TXT.fullmatch(x.strip()) and not re.search(re.escape(cargo), x, re.I):
+                        empresa = x
+                        break
+            if not empresa:
+                m = re.search(r"\b(?:na|no|em|at|@)\s+([A-ZÀ-Ý0-9][\w&.\- À-ÿ]{2,60})", " ".join(partes[1:]))
+                if m:
+                    empresa = m.group(1).strip()
+            local = ""
+            m = re.search(r"(?:Localidade|Localização|Location)\s*:\s*([^·|\n]{2,60})", snip)
+            if m:
+                local = m.group(1).strip(" .")
+            elif cid and cid in _fold_simples(snip + " " + titulo):
+                local = cidade
+            vistos.add(link)
+            pessoas.append({"nome": nome, "cargo": cargo, "empresa": empresa[:80], "linkedin": link, "local": local[:60]})
+        if len(res) < 8:
+            break
+    return {"pessoas": pessoas, "uso_hoje": _serper_uso.get("total", 0)}
+
+
+def vagas_da_empresa(body, quem):
+    """Sinal de compra: a empresa tem vaga aberta? (LinkedIn Vagas, Gupy, Indeed, InfoJobs, Vagas.com, pelo Google)
+    -> {"vagas": [{"titulo", "link"}]}"""
+    nome = str(body.get("nome") or "").strip()[:120]
+    if not SERPER_KEY:
+        raise EngineError(501, "busca no Google não configurada (SERPER_API_KEY)")
+    toks = _tokens_empresa(nome)
+    if not toks:
+        return {"vagas": []}
+    precisa = 1 if len(toks) == 1 else 2
+    q = f'"{nome}" (vaga OR vagas) (site:linkedin.com/jobs OR site:gupy.io OR site:br.indeed.com OR site:infojobs.com.br OR site:vagas.com.br)'
+    vagas = []
+    for r in serper_buscar(q, quem):
+        txt = _fold_simples(r.get("title", "") + " " + r.get("snippet", ""))
+        if sum(1 for t in toks if t in txt) < precisa:
+            continue
+        titulo = re.sub(r"\s*[|–-]\s*(LinkedIn|Gupy|Indeed|InfoJobs|Vagas\.com).*$", "", r.get("title", ""), flags=re.I).strip()
+        if titulo and len(vagas) < 5:
+            vagas.append({"titulo": titulo[:120], "link": r.get("link", "")})
+    return {"vagas": vagas}
 
 
 def cnpj_valido(d):
@@ -1674,6 +1820,11 @@ class Handler(BaseHTTPRequestHandler):
                 if caller == "sem-login":
                     return self._json(401, {"erro": "faça login no Prospecta+"})
                 return self._json(200, perfil_da_pessoa(self._body(), caller))
+            if method == "POST" and path in ("/leads/linkedin-pessoas", "/leads/vagas", "/leads/instagram-info"):
+                if caller == "sem-login":   # custa por busca: nunca sem login
+                    return self._json(401, {"erro": "faça login no Prospecta+"})
+                fn = {"/leads/linkedin-pessoas": pessoas_linkedin_google, "/leads/vagas": vagas_da_empresa, "/leads/instagram-info": instagram_info}[path]
+                return self._json(200, fn(self._body(), caller))
             if method == "POST" and path == "/leads/cnpj-google":
                 if caller == "sem-login":   # custa por busca: nunca sem login
                     return self._json(401, {"erro": "faça login no Prospecta+"})
