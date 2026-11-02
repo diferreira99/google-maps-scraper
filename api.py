@@ -15,6 +15,7 @@ Google lookup (Serper) for what the business site did not have, login required, 
   POST   /leads/redes-google    {"leads": [{"id": "...", "nome": "...", "cidade": "...", "telefone": "...", "site": "...", "faltam": ["instagram","linkedin","decisor"]}]}
 
 Socials lookup used by the page:
+  POST   /leads/cnpj-google {"nome": "...", "cidade": "..."} -> {"cnpj": "14 dígitos" | null, "fonte": link}
   POST   /enrich                {"sites": ["https://example.com", ...] or [{"site": "...", "nome": "..."}]}   (max 20 per request)
 
 Every endpoint is reachable from the public URL with no auth, so site visits only go to public
@@ -810,6 +811,47 @@ def redes_pelo_google(lead, faltam, quem):
     return out
 
 
+def cnpj_valido(d):
+    if not re.fullmatch(r"\d{14}", d or "") or len(set(d)) == 1:
+        return False
+    def dv(n):
+        pesos = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2] if n == 12 else [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+        s = sum(int(d[i]) * p for i, p in enumerate(pesos)) % 11
+        return 0 if s < 2 else 11 - s
+    return dv(12) == int(d[12]) and dv(13) == int(d[13])
+
+
+_CNPJ_PALAVRAS_FRACAS = {"ltda", "eireli", "me", "epp", "sa", "s/a", "comercio", "servicos", "servico", "de", "da", "do", "das", "dos", "e", "the"}
+
+
+def buscar_cnpj_google(body, quem):
+    """Acha o CNPJ de uma empresa pelo nome e cidade: busca no Google e só aceita o CNPJ válido que aparece
+    no mesmo resultado que o nome da empresa. -> {"cnpj": "14 dígitos" | None, "fonte": link}"""
+    nome = str(body.get("nome") or "").strip()[:120]
+    cidade = str(body.get("cidade") or "").strip()[:80]
+    if not SERPER_KEY:
+        raise EngineError(501, "busca no Google não configurada (SERPER_API_KEY)")
+    if len(nome) < 3:
+        raise EngineError(400, "nome muito curto")
+    sem = lambda t: unicodedata.normalize("NFD", (t or "").lower()).encode("ascii", "ignore").decode()
+    toks = [t for t in re.findall(r"[a-z0-9]+", sem(nome)) if len(t) > 2 and t not in _CNPJ_PALAVRAS_FRACAS]
+    if not toks:
+        return {"cnpj": None}
+    precisa = 1 if len(toks) == 1 else 2
+    melhor = None
+    for r in serper_buscar(f'"{nome}" {cidade} CNPJ'.strip(), quem):
+        txt = f"{r.get('title', '')} {r.get('snippet', '')}"
+        baixo = sem(txt)
+        acertos = sum(1 for t in toks if t in baixo)
+        if acertos < precisa:
+            continue
+        for c in re.findall(r"\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b", txt):
+            d = re.sub(r"\D", "", c)
+            if cnpj_valido(d) and (not melhor or acertos > melhor[1]):
+                melhor = (d, acertos, r.get("link", ""))
+    return {"cnpj": melhor[0], "fonte": melhor[2]} if melhor else {"cnpj": None}
+
+
 def buscar_redes_google(body, quem):
     leads = body.get("leads")
     if not SERPER_KEY:
@@ -1583,6 +1625,10 @@ class Handler(BaseHTTPRequestHandler):
                 if caller == "sem-login":   # custa por busca: nunca sem login, nem no modo transição
                     return self._json(401, {"erro": "faça login no Prospecta+"})
                 return self._json(200, buscar_redes_google(self._body(), caller))
+            if method == "POST" and path == "/leads/cnpj-google":
+                if caller == "sem-login":   # custa por busca: nunca sem login
+                    return self._json(401, {"erro": "faça login no Prospecta+"})
+                return self._json(200, buscar_cnpj_google(self._body(), caller))
             if path == "/leads/buscas" and method == "GET":
                 return self._json(200, {"buscas": list_searches()})
             if path == "/leads/buscas" and method == "POST":
