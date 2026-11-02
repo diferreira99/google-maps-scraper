@@ -18,6 +18,7 @@ Socials lookup used by the page:
   POST   /leads/decisor-perfil {"pessoa": "Maria da Silva", "empresa": "...", "cidade": "..."} -> {"linkedin": url | null, "cargo": ...}
   POST   /leads/cnpj-google {"nome": "...", "cidade": "..."} -> {"cnpj": "14 dígitos" | null, "fonte": link}
   POST   /leads/linkedin-pessoas {"setor": "...", "cidade": "...", "cargos": [...], "paginas": 1-3} -> {"pessoas": [{nome, cargo, empresa, linkedin, local}]}
+  GET    /leads/google-uso -> {"usados", "limite", "restante"}   (buscas no Google de hoje, deste usuário)
   POST   /leads/vagas {"nome": "..."} -> {"vagas": [{titulo, link}]}   (sinal de compra: empresa contratando)
   POST   /leads/instagram-info {"handle": "..."} -> {"seguidores", "posts", "bio"}   (o que o Google mostra do perfil)
   POST   /enrich                {"sites": ["https://example.com", ...] or [{"site": "...", "nome": "..."}]}   (max 20 per request)
@@ -1820,6 +1821,12 @@ class Handler(BaseHTTPRequestHandler):
                 if caller == "sem-login":
                     return self._json(401, {"erro": "faça login no Prospecta+"})
                 return self._json(200, perfil_da_pessoa(self._body(), caller))
+            if method == "GET" and path == "/leads/google-uso":
+                hoje = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                usados = _serper_uso["por"].get(caller, 0) if _serper_uso["dia"] == hoje else 0
+                total = _serper_uso["total"] if _serper_uso["dia"] == hoje else 0
+                return self._json(200, {"usados": usados, "limite": SERPER_LIMITE_USUARIO,
+                                        "restante": max(0, min(SERPER_LIMITE_USUARIO - usados, SERPER_LIMITE_DIA - total))})
             if method == "POST" and path in ("/leads/linkedin-pessoas", "/leads/vagas", "/leads/instagram-info"):
                 if caller == "sem-login":   # custa por busca: nunca sem login
                     return self._json(401, {"erro": "faça login no Prospecta+"})
