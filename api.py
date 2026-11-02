@@ -869,6 +869,7 @@ def instagram_info(body, quem):
     return {"handle": h}
 
 
+_NAO_PESSOA = re.compile(r"(?i)\b(contabil|cont[aá]bil|ltda|assessoria|consultoria|escrit[oó]rio|servi[cç]os|empresa|grupo|eireli|ind[uú]stria|com[eé]rcio|\bna\b)")
 _DECISAO_PADRAO = ["sócio", "sócia", "proprietário", "fundador", "CEO", "diretor"]
 
 
@@ -905,6 +906,9 @@ def pessoas_linkedin_google(body, quem):
             nome = re.sub(r"\s*\(.*?\)\s*", " ", partes[0]).strip()
             if not re.fullmatch(r"[A-Za-zÀ-ÿ'.\s]{4,60}", nome) or len(nome.split()) < 2:
                 continue
+            # página de empresa ou cargo no lugar do nome ("Galan Contabilidade", "Sócio proprietário na X"): não é pessoa
+            if _NAO_PESSOA.search(nome) or _CARGO_TXT.search(nome):
+                continue
             snip = r.get("snippet", "")
             cargo = ""
             for x in partes[1:] + [snip]:
@@ -927,6 +931,8 @@ def pessoas_linkedin_google(body, quem):
                 m = re.search(r"\b(?:na|no|em|at|@)\s+([A-ZÀ-Ý0-9][\w&.\- À-ÿ]{2,60})", " ".join(partes[1:]))
                 if m:
                     empresa = m.group(1).strip()
+            if empresa and (_fold_simples(empresa) == _fold_simples(nome) or re.fullmatch(r"(?i)(contador[a]?|consultor[a]?|aut[oô]nom[oa]|freelancer|empres[aá]ri[oa])", empresa.strip())):
+                empresa = ""
             local = ""
             m = re.search(r"(?:Localidade|Localização|Location)\s*:\s*([^·|\n]{2,60})", snip)
             if m:
